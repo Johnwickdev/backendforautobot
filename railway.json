@@ -1,0 +1,21 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "environments": {
+    "production": {
+      "LIVEFEED_LOG_LEVEL": "INFO",
+      "UPSTOX_AUTH_LOG_LEVEL": "INFO",
+      "NSE_JSON_DOWNLOADER_LOG_LEVEL": "INFO",
+      "STREAM_CONTROLLER_LOG_LEVEL": "INFO",
+      "NSE_INSTRUMENT_LOG_LEVEL": "INFO",
+      "REACTOR_NETTY_HTTP_CLIENT_LOG_LEVEL": "INFO"
+    },
+    "debug": {
+      "LIVEFEED_LOG_LEVEL": "DEBUG",
+      "UPSTOX_AUTH_LOG_LEVEL": "DEBUG",
+      "NSE_JSON_DOWNLOADER_LOG_LEVEL": "DEBUG",
+      "STREAM_CONTROLLER_LOG_LEVEL": "DEBUG",
+      "NSE_INSTRUMENT_LOG_LEVEL": "DEBUG",
+      "REACTOR_NETTY_HTTP_CLIENT_LOG_LEVEL": "DEBUG"
+    }
+  }
+}

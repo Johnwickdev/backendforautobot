@@ -181,6 +181,7 @@
       <configuration>
         <workingDirectory>frontend</workingDirectory>
         <npmInheritsProxyConfigFromMaven>false</npmInheritsProxyConfigFromMaven>
+        <skip>${skipFrontend}</skip>
       </configuration>
 
       <executions>

@@ -20,8 +20,12 @@ jobs:
           java-version: 17
           distribution: corretto
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
       - name: Build JAR
-        run: ./mvnw package -DskipTests
+        run: ./mvnw package -DskipTests -DskipFrontend=true
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3

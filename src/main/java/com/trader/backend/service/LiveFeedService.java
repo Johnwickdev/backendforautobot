@@ -44,10 +44,14 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.Map;
 import org.springframework.context.event.EventListener;
 import com.trader.backend.events.FilteredPremiumsUpdatedEvent;
+import com.trader.backend.events.LtpEvent;
 
 
 @Service
@@ -67,9 +71,32 @@ public class LiveFeedService {
     private boolean mockMode;
 // Tracks currently subscribed CE/PE instruments for debug/monitoring
 private final Set<String> subscribed = ConcurrentHashMap.newKeySet();
-    private final Sinks.Many<JsonNode> sink = Sinks.many().multicast().onBackpressureBuffer();
+private final Sinks.Many<JsonNode> sink = Sinks.many().multicast().onBackpressureBuffer();
 private final AtomicBoolean optionsStreamStarted = new AtomicBoolean(false);
 private final AtomicBoolean started = new AtomicBoolean(false);
+
+    private final Sinks.Many<LtpEvent> ltpSink = Sinks.many().multicast().onBackpressureBuffer();
+    public Flux<LtpEvent> ltpEvents() { return ltpSink.asFlux(); }
+
+    @Value("${ltp.log.enabled:true}")
+    private boolean ltpLogEnabled;
+    @Value("${ltp.log.interval.ms:2000}")
+    private long ltpLogIntervalMs;
+    @Value("${ltp.log.min.price.delta:0.5}")
+    private double ltpLogMinDelta;
+    @Value("${influx.summary.interval.ms:15000}")
+    private long influxSummaryMs;
+
+    private final Map<String, LogState> logState = new ConcurrentHashMap<>();
+    private static class LogState { long lastTs; double lastPrice; }
+
+    private final Map<String, NseInstrument> instrumentCache = new ConcurrentHashMap<>();
+    private final Set<String> loggedInstruments = ConcurrentHashMap.newKeySet();
+    private final AtomicLong futWrites = new AtomicLong();
+    private final AtomicLong optWrites = new AtomicLong();
+    private final AtomicLong futWriteFails = new AtomicLong();
+    private final AtomicLong optWriteFails = new AtomicLong();
+    private final AtomicReference<String> lastInfluxError = new AtomicReference<>("");
     /**
      * Exposed for your controllers to subscribe
      **/
@@ -88,6 +115,19 @@ private final AtomicBoolean started = new AtomicBoolean(false);
                 .subscribe(e -> {
                     log.warn("Auth token expired or refresh failed; waiting for re-login");
                     started.set(false);
+                });
+
+        Flux.interval(Duration.ofMillis(influxSummaryMs))
+                .subscribe(i -> {
+                    long fut = futWrites.getAndSet(0);
+                    long opt = optWrites.getAndSet(0);
+                    long futFail = futWriteFails.getAndSet(0);
+                    long optFail = optWriteFails.getAndSet(0);
+                    log.info("Influx summary — FUT writes={}, OPT writes={} (last {}s)", fut, opt, influxSummaryMs / 1000);
+                    if (futFail > 0 || optFail > 0) {
+                        log.warn("Influx failures — FUT={} OPT={} lastError={}", futFail, optFail, lastInfluxError.get());
+                        lastInfluxError.set("");
+                    }
                 });
     }
 
@@ -163,7 +203,6 @@ private final AtomicBoolean started = new AtomicBoolean(false);
                         .thenMany(session.receive()
                                 .map(WebSocketMessage::getPayload)           // DataBuffer
                                 .map(this::parseProtoFeedResponse)           // FeedResponse → JsonNode
-                                .doOnNext(tick -> log.info("⏳ tick → {}", tick))
                                 .doOnNext(local::tryEmitNext)
                         )
                         .then()
@@ -224,7 +263,7 @@ private final AtomicBoolean started = new AtomicBoolean(false);
                 .retrieve()
                 .bodyToMono(JsonNode.class)
                 .flatMapMany(response -> {
-                    log.info("🔍 Full response from option chain: {}", response.toPrettyString());
+                    log.debug("🔍 Full response from option chain: {}", response.toPrettyString());
 
                     JsonNode records = response.path("data").path("records");
                     if (records.isMissingNode() || !records.isArray()) {
@@ -298,7 +337,7 @@ private final AtomicBoolean started = new AtomicBoolean(false);
                     byte[] frameBytes;
                     try {
                         frameBytes = frame.toString().getBytes(StandardCharsets.UTF_8);
-                        log.info("🧾 Final SUB_FRAME for Nifty Options: {}", frame.toPrettyString());
+                        log.debug("🧾 Final SUB_FRAME for Nifty Options: {}", frame.toPrettyString());
                     } catch (Exception e) {
                         log.error("❌ Failed to build SUB_FRAME", e);
                         return Flux.empty();
@@ -308,10 +347,7 @@ private final AtomicBoolean started = new AtomicBoolean(false);
                             .flatMapMany(wsUrl -> openWebSocketForOptions(wsUrl, frameBytes));
                 })
                 .subscribe(
-                        tick -> {
-                            log.info("💥 Nifty Option Tick: {}", tick.toPrettyString());
-                            sink.tryEmitNext((JsonNode) tick);
-                        },
+                        tick -> sink.tryEmitNext((JsonNode) tick),
                         error -> log.error("❌ Option WS failed: ", error)
                 );
     }
@@ -361,8 +397,6 @@ private final AtomicBoolean started = new AtomicBoolean(false);
                         .thenMany(session.receive()
                                 .map(WebSocketMessage::getPayload)
                                 .map(this::parseProtoFeedResponse)
-                                // log every tick under “ticks for option → …”
-                                .doOnNext(optJson -> log.info("⏳ ticks for option → {}", optJson))
                                 .doOnNext(local::tryEmitNext)
                         )
                         .then()
@@ -410,9 +444,12 @@ private final AtomicBoolean started = new AtomicBoolean(false);
                         .path("marketFF")
                         .path("ltpc")
                         .path("ltp");
-                if (!ltpNode.isMissingNode()) {
-                    log.info("📈 Option tick: {} LTP={}", instrumentKey, ltpNode.asDouble());
-                    log.info("📊 Full tick for {} -> {}", instrumentKey, feed.toPrettyString());
+                if (ltpNode.isNumber()) {
+                    double ltp = ltpNode.asDouble();
+                    long ts = extractTimestamp(feed, tick);
+                    ltpSink.tryEmitNext(new LtpEvent(instrumentKey, ltp, Instant.ofEpochMilli(ts)));
+                    maybeLogLtp(instrumentKey, ltp, ts);
+                    writeTickToInflux(instrumentKey, feed, ts);
 
                     var result = quantAnalysisService.analyze(instrumentKey, feed);
                     if (result.signal() != QuantAnalysisService.Signal.NONE) {
@@ -423,8 +460,6 @@ private final AtomicBoolean started = new AtomicBoolean(false);
                                 String.format("%.4f", result.imbalance()),
                                 String.format("%.2f", result.noise()));
                     }
-                } else {
-                    log.debug("⏳ tick for {}", instrumentKey);
                 }
             });
         })
@@ -468,18 +503,13 @@ JsonNode ltpNode = tick.path("feeds")
     .path("ltp");
                 if (!ltpNode.isMissingNode()) {
                     double ltp = ltpNode.asDouble();
-                    log.info("📉 LIVE LTP for NIFTY FUT: {}", ltp);
-
-                    // ✅ Trigger CE/PE filtering based on this LTP
+                    long ts = extractTimestamp(tick.path("feeds").path(instrumentKey), tick);
+                    maybeLogLtp(instrumentKey, ltp, ts);
+                    ltpSink.tryEmitNext(new LtpEvent(instrumentKey, ltp, Instant.ofEpochMilli(ts)));
+                    writeTickToInflux(instrumentKey, tick.path("feeds").path(instrumentKey), ts);
                     nseInstrumentService.filterStrikesAroundLtp(ltp);
-                } else {
-                    log.warn("⚠️ LTP not found in tick");
                 }
 
-                // Just log for debugging
-                log.info("📡 [Nifty Future] Tick → {}", tick.toPrettyString());
-
-                // Still emit tick to sink if needed
                 sink.tryEmitNext(tick);
             } catch (Exception e) {
                 log.error("❌ Error parsing tick JSON or filtering: ", e);
@@ -522,50 +552,32 @@ public void streamNiftyFutAndTriggerCEPE() {
     fetchWebSocketUrl()
             .flatMapMany(wsUrl -> openWebSocketForOptions(wsUrl, buildSubFrame(instrumentKey)))
             .doOnNext(tick -> {
-                    try {
-                        // ✅ Correct LTP path under fullFeed → marketFF → ltpc → ltp
-                        JsonNode ltpNode = tick.path("feeds")
-                                .path(instrumentKey)
-                                .path("fullFeed")
-                                .path("marketFF")
-                                .path("ltpc")
-                                .path("ltp");
+                try {
+                    JsonNode feed = tick.path("feeds").path(instrumentKey);
+                    JsonNode ltpNode = feed
+                            .path("fullFeed")
+                            .path("marketFF")
+                            .path("ltpc")
+                            .path("ltp");
 
-                        if (ltpNode != null && ltpNode.isNumber()) {
-                            double ltp = ltpNode.asDouble();
-                            log.info("📈 Extracted NIFTY FUT LTP: {}", ltp);
+                    if (ltpNode.isNumber()) {
+                        double ltp = ltpNode.asDouble();
+                        long ts = extractTimestamp(feed, tick);
+                        ltpSink.tryEmitNext(new LtpEvent(instrumentKey, ltp, Instant.ofEpochMilli(ts)));
+                        maybeLogLtp(instrumentKey, ltp, ts);
+                        writeTickToInflux(instrumentKey, feed, ts);
 
-                            // write to Influx (optional)
-                            writeNiftyFutLtpToInflux(ltp, System.currentTimeMillis());
-
-                            // 🔥 Filter & save CE/PE based on LTP
-                            nseInstrumentService.filterStrikesAroundLtp(ltp);
-
-                            // 🎯 (Re)start the filtered CE/PE stream (dynamic + reconnect-safe)
-                            streamFilteredNiftyOptions();
-                        } else {
-                            log.warn("⚠️ LTP not found in tick — instrumentKey={}", instrumentKey);
-                        }
-                    } catch (Exception ex) {
-                        log.error("⚠️ Failed to extract LTP or trigger filtering", ex);
+                        nseInstrumentService.filterStrikesAroundLtp(ltp);
+                        streamFilteredNiftyOptions();
+                    } else {
+                        log.warn("⚠️ LTP not found in tick — instrumentKey={}", instrumentKey);
                     }
-                })
+                } catch (Exception ex) {
+                    log.error("⚠️ Failed to extract LTP or trigger filtering", ex);
+                }
+            })
             .doOnError(err -> log.error("❌ WebSocket stream failed:", err))
             .subscribe();
-}
-public void writeNiftyFutLtpToInflux(double ltp, long timestamp) {
-    Point point = Point
-            .measurement("nifty_fut_ltp")
-            .addTag("symbol", "NIFTY")
-            .addField("ltp", ltp)
-            .time(Instant.ofEpochMilli(timestamp), WritePrecision.MS);
-
-    if (writeApi != null) {
-        writeApi.writePoint(point);
-        log.info("✅ [Influx] NIFTY FUT LTP written: {}", point);
-    } else {
-        log.debug("Influx disabled; skipping write: {}", point);
-    }
 }
 /** Builds a fresh SUB frame from the current filtered_nifty_premiums (15 CE + 15 PE). */
 private byte[] buildFilteredSubFrame() {
@@ -610,6 +622,85 @@ private Flux<JsonNode> openWebSocketWithDynamicSub(String wsUrl, java.util.funct
 
     return local.asFlux();
 }
+
+    private void maybeLogLtp(String instrumentKey, double ltp, long ts) {
+        if (!ltpLogEnabled) return;
+        LogState st = logState.computeIfAbsent(instrumentKey, k -> new LogState());
+        if (ts - st.lastTs >= ltpLogIntervalMs && Math.abs(ltp - st.lastPrice) >= ltpLogMinDelta) {
+            log.info("LTP key={} price={} ts={}", instrumentKey, ltp, Instant.ofEpochMilli(ts));
+            st.lastTs = ts;
+            st.lastPrice = ltp;
+        }
+    }
+
+    private void writeTickToInflux(String instrumentKey, JsonNode feed, long ts) {
+        if (writeApi == null) return;
+        NseInstrument info = instrumentCache.computeIfAbsent(instrumentKey,
+                k -> mongoTemplate.findById(k, NseInstrument.class));
+        if (info == null) return;
+        boolean isFut = info.getInstrumentType() != null && info.getInstrumentType().toUpperCase().contains("FUT");
+        String measurement = isFut ? "nifty_fut_ticks" : "nifty_option_ticks";
+
+        long exp = info.getExpiry();
+        if (exp < 1_000_000_000_000L) exp *= 1000L;
+        String expiry = Instant.ofEpochMilli(exp).toString().substring(0, 10);
+        String symbol = info.getTrading_symbol() != null ? info.getTrading_symbol() : info.getName();
+
+        Point p = Point.measurement(measurement)
+                .addTag("instrumentKey", instrumentKey)
+                .addTag("symbol", symbol == null ? "" : symbol)
+                .addTag("segment", info.getSegment())
+                .addTag("type", info.getInstrumentType())
+                .addTag("expiry", expiry);
+        String t = info.getInstrumentType();
+        if (!isFut && t != null && (t.equalsIgnoreCase("CE") || t.equalsIgnoreCase("PE"))) {
+            p.addTag("side", t.toUpperCase());
+        }
+
+        addNumericFields(p, feed, "");
+        p.addField("raw", feed.toString());
+        p.time(Instant.ofEpochMilli(ts), WritePrecision.MS);
+
+        try {
+            writeApi.writePoint(p);
+            if (loggedInstruments.add(instrumentKey)) {
+                log.info("Influx write OK — measurement={} key={}", measurement, instrumentKey);
+            }
+            if (isFut) futWrites.incrementAndGet(); else optWrites.incrementAndGet();
+        } catch (Exception e) {
+            lastInfluxError.set(e.getMessage());
+            if (isFut) futWriteFails.incrementAndGet(); else optWriteFails.incrementAndGet();
+        }
+    }
+
+    private void addNumericFields(Point p, JsonNode node, String prefix) {
+        node.fields().forEachRemaining(entry -> {
+            String key = prefix.isEmpty() ? entry.getKey() : prefix + '_' + entry.getKey();
+            JsonNode val = entry.getValue();
+            if (val.isNumber()) {
+                p.addField(key, val.asDouble());
+            } else if (val.isObject()) {
+                addNumericFields(p, val, key);
+            }
+        });
+    }
+
+    private long extractTimestamp(JsonNode feed, JsonNode tick) {
+        String[] ptrs = {"/fullFeed/marketFF/ts", "/fullFeed/ts", "/ts", "/timestamp"};
+        for (String ptr : ptrs) {
+            JsonNode n = feed.at(ptr);
+            if (n.isNumber()) {
+                long v = n.asLong();
+                return v < 1_000_000_000_000L ? v * 1000L : v;
+            }
+        }
+        JsonNode c = tick.path("currentTs");
+        if (c.isNumber()) {
+            long v = c.asLong();
+            return v < 1_000_000_000_000L ? v * 1000L : v;
+        }
+        return System.currentTimeMillis();
+    }
 
 
 @EventListener

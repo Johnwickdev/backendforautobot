@@ -1,48 +1,11 @@
-<?xml version="1.0" encoding="UTF-8"?>
 <configuration>
-    <springProperty scope="context" name="LOG_DIR" source="LOG_DIR" defaultValue="logs"/>
-    <property name="FILE_NAME" value="app.log"/>
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{yyyy-MM-dd HH:mm:ss} %-5level %logger{36} - %msg%n</pattern>
+    </encoder>
+  </appender>
 
-    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
-        <file>${LOG_DIR}/${FILE_NAME}</file>
-        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
-            <fileNamePattern>${LOG_DIR}/${FILE_NAME}.%d{yyyy-MM-dd}.%i.gz</fileNamePattern>
-            <timeBasedFileNamingAndTriggeringPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedFNATP">
-                <maxFileSize>10MB</maxFileSize>
-            </timeBasedFileNamingAndTriggeringPolicy>
-            <maxHistory>30</maxHistory>
-        </rollingPolicy>
-        <encoder>
-            <pattern>%d{yyyy-MM-dd HH:mm:ss} %-5level %logger{36} - %msg%n</pattern>
-        </encoder>
-    </appender>
-
-    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
-        <encoder>
-            <pattern>%d{yyyy-MM-dd HH:mm:ss} %-5level %logger{36} - %msg%n</pattern>
-        </encoder>
-    </appender>
-
-    <springProperty scope="context" name="LOG_AGGREGATOR_HOST" source="LOG_AGGREGATOR_HOST"/>
-    <springProperty scope="context" name="LOG_AGGREGATOR_PORT" source="LOG_AGGREGATOR_PORT"/>
-
-    <if condition='property("LOG_AGGREGATOR_HOST").length() > 0 &amp;&amp; property("LOG_AGGREGATOR_PORT").length() > 0'>
-        <then>
-            <appender name="SOCKET" class="ch.qos.logback.classic.net.SocketAppender">
-                <remoteHost>${LOG_AGGREGATOR_HOST}</remoteHost>
-                <port>${LOG_AGGREGATOR_PORT}</port>
-                <reconnectionDelay>10000</reconnectionDelay>
-            </appender>
-        </then>
-    </if>
-
-    <root level="INFO">
-        <appender-ref ref="CONSOLE"/>
-        <appender-ref ref="FILE"/>
-        <if condition='property("LOG_AGGREGATOR_HOST").length() > 0 &amp;&amp; property("LOG_AGGREGATOR_PORT").length() > 0'>
-            <then>
-                <appender-ref ref="SOCKET"/>
-            </then>
-        </if>
-    </root>
+  <root level="INFO">
+    <appender-ref ref="STDOUT" />
+  </root>
 </configuration>

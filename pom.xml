@@ -57,11 +57,6 @@
 			<version>1.11.1</version>
 		</dependency>
 
-		<!-- Reactor Netty WS client -->
-		<dependency>
-			<groupId>io.projectreactor.netty</groupId>
-			<artifactId>reactor-netty</artifactId>
-		</dependency>
 
 		<!-- Protobuf runtime -->
 		<dependency>
@@ -81,11 +76,11 @@
 			<artifactId>lombok</artifactId>
 			<optional>true</optional>
 		</dependency>
-		<!-- Gives WebClient, Mono/Flux etc., but does NOT switch you to Netty -->
-<dependency>
-  <groupId>org.springframework</groupId>
-  <artifactId>spring-webflux</artifactId>
-</dependency>
+                <!-- Reactive WebClient support -->
+                <dependency>
+                        <groupId>org.springframework.boot</groupId>
+                        <artifactId>spring-boot-starter-webflux</artifactId>
+                </dependency>
 
 
 		<!-- Testing -->
@@ -114,12 +109,6 @@
                         <artifactId>spring-boot-starter-data-mongodb</artifactId>
                 </dependency>
 
-                <!-- Janino for Logback conditional processing -->
-                <dependency>
-                        <groupId>org.codehaus.janino</groupId>
-                        <artifactId>janino</artifactId>
-                        <version>3.1.9</version>
-                </dependency>
 
         </dependencies>
 

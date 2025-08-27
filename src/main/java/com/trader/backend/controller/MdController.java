@@ -142,11 +142,16 @@ public class MdController {
     @GetMapping("/ltp")
     public ResponseEntity<Map<String, Object>> getNiftyFutLtp() {
         String instKey = selectionService.getMainFutureKey();
-        Double ltp = liveFeedService.getLatestLtp(instKey);
+        LiveFeedService.LatestQuote quote = liveFeedService.lastQuote(instKey).orElse(null);
+        Double ltp = quote != null ? quote.ltp() : null;
+        Instant ts = quote != null ? quote.ts() : null;
         if (ltp == null) {
             ltp = candleService.readLatestLtpFromInflux(instKey);
+            if (ltp != null) {
+                ts = Instant.now();
+            }
         }
-        if (ltp == null) {
+        if (ltp == null || ts == null) {
             Map<String, Object> err = new LinkedHashMap<>();
             err.put("error", "ltp-unavailable");
             return ResponseEntity.status(503).body(err);
@@ -154,7 +159,7 @@ public class MdController {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("instrumentKey", instKey);
         body.put("ltp", ltp);
-        body.put("timestamp", java.time.Instant.now().toString());
+        body.put("timestamp", ts.toString());
         return ResponseEntity.ok(body);
     }
 }

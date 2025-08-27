@@ -11,6 +11,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.FileInputStream;
 import java.io.InputStream;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -76,6 +77,9 @@ public class NseInstrumentService {
     private List<NseInstrument> nseCache = Collections.emptyList();
     private long nseCacheLoadedAt = 0L;
     private static final long CACHE_TTL_MS = 24 * 60 * 60 * 1000L; // 24h
+
+    // ensure heavy CE/PE filtering runs once
+    private final AtomicBoolean strikesFiltered = new AtomicBoolean(false);
 
     /** Ensure NSE.json is loaded into memory. */
     public synchronized void ensureNseJsonLoaded(boolean force) {
@@ -181,6 +185,9 @@ publisher.publishEvent(new FilteredPremiumsUpdatedEvent(this, activeExpiry, filt
  * If the universe is empty, we auto-refresh it from NSE.json by nearest expiry.
  */
 public void filterStrikesAroundLtp(double niftyLtp) {
+    if (!strikesFiltered.compareAndSet(false, true)) {
+        return;
+    }
     log.info("🔎 Filtering CE/PE around LTP={} (step=50) for currently loaded expiry in nse_instruments", niftyLtp);
 
     // 0) Ensure universe exists in DB; if not, refresh from JSON
@@ -441,7 +448,7 @@ public void saveNiftyFuturesToMongo() {
 }
 
 // helper: choose nearest non-expired NIFTY FUT using IST 3:30 PM cutoff
-private Optional<NseInstrument> selectCurrentNiftyFuture(List<NseInstrument> futs) {
+Optional<NseInstrument> selectCurrentNiftyFuture(List<NseInstrument> futs) {
     if (futs == null || futs.isEmpty()) return Optional.empty();
 
     // de-duplicate by instrument_key
@@ -599,9 +606,8 @@ public Optional<String> nearestNiftyFutureKey() {
         return Optional.empty();
     }
 
-    // persist chosen contract
-    mongoTemplate.dropCollection("current_nifty_future");
-    mongoTemplate.insert(current, "current_nifty_future");
+    // persist chosen contract using upsert
+    mongoTemplate.save(current, "current_nifty_future");
 
     String chosenMonth = extractMonth(current.getTrading_symbol());
     List<String> reasons = new ArrayList<>();

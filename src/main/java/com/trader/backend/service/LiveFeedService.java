@@ -564,7 +564,6 @@ JsonNode ltpNode = tick.path("feeds")
                     ltpSink.tryEmitNext(new LtpEvent(instrumentKey, ltp, Instant.ofEpochMilli(ts)));
                     writeTickToInflux(instrumentKey, tick.path("feeds").path(instrumentKey), ts);
                     lastLtp.put(instrumentKey, new LatestQuote(ltp, Instant.ofEpochMilli(ts)));
-                    nseInstrumentService.filterStrikesAroundLtp(ltp);
                 }
 
                 sink.tryEmitNext(tick);

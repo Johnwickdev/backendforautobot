@@ -176,9 +176,12 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
                     long opt = optWrites.getAndSet(0);
                     ticksLast60s.set(fut + opt);
                     String source = connected.get() ? "live" : "influx";
-                    log.info("HEARTBEAT market={} liveFut={} liveOpts={} writesFut={}/15s writesOpt={}/15s sourceUsed={} ceLoadedCount={} peLoadedCount={}",
-                            open ? "open" : "closed", futOn ? "on" : "off", optCount, fut, opt, source,
-                            ceLoadedCount.get(), peLoadedCount.get());
+                    if (open) {
+                        log.info(
+                                "HEARTBEAT market={} liveFut={} liveOpts={} writesFut={}/15s writesOpt={}/15s sourceUsed={} ceLoadedCount={} peLoadedCount={}",
+                                "open", futOn ? "on" : "off", optCount, fut, opt, source,
+                                ceLoadedCount.get(), peLoadedCount.get());
+                    }
                 });
     }
 
@@ -847,7 +850,6 @@ private Flux<JsonNode> openWebSocketWithDynamicSub(String wsUrl, java.util.funct
             optRows++;
         }
         log.info("MARKET CLOSED — last snapshot FUT={}, OPT rows={}", futPrice, optRows);
-        lastTick.clear();
         optionBuffers.clear();
         connected.set(false);
         futSubscribed.set(false);

@@ -11,24 +11,18 @@ import java.util.Optional;
 @RequiredArgsConstructor
 public class LtpService {
     private final LiveFeedService liveFeedService;
-    private final InfluxTickService influxTickService;
 
     public record Result(Double ltp, Instant ts, String source) {}
 
     public Result resolve(String instrumentKey) {
         Instant now = Instant.now();
+        boolean marketOpen = liveFeedService.isMarketOpen();
         Optional<Tick> live = liveFeedService.getLatestTick(instrumentKey)
-                .filter(t -> Duration.between(t.ts(), now).toMillis() <= 5000);
+                .filter(t -> marketOpen ? Duration.between(t.ts(), now).toMillis() <= 5000 : true);
         if (live.isPresent()) {
             Tick t = live.get();
             liveFeedService.logResolvedLtp(instrumentKey, t.ltp(), "live");
             return new Result(t.ltp(), t.ts(), "live");
-        }
-        Optional<Tick> stored = influxTickService.latestTick(instrumentKey);
-        if (stored.isPresent()) {
-            Tick t = stored.get();
-            liveFeedService.logResolvedLtp(instrumentKey, t.ltp(), "stored");
-            return new Result(t.ltp(), t.ts(), "influx");
         }
         return new Result(null, null, "none");
     }

@@ -823,7 +823,11 @@ private Flux<JsonNode> openWebSocketWithDynamicSub(String wsUrl, java.util.funct
                 label = info.getTradingSymbol();
             }
         }
-        log.info("LTP [{}] {}={}", label, source, ltp);
+        if ("NIFTY FUT".equals(label)) {
+            log.info("ltp for nifty future = {} ({}).", ltp, source);
+        } else {
+            log.info("LTP [{}] {}={}", label, source, ltp);
+        }
     }
 
     private void onMarketClose() {

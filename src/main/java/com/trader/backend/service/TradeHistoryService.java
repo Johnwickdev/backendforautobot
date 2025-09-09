@@ -76,7 +76,7 @@ public class TradeHistoryService {
         String src = "live";
         if (rows.isEmpty()) {
             rows = fetchFromInflux(symbols, limit);
-            src = "influx";
+            src = rows.isEmpty() ? "none" : "influx";
         }
         return Optional.of(new Result(rows, src));
     }
@@ -121,7 +121,26 @@ public class TradeHistoryService {
                 influxBucket, set, limit * 3);
 
         QueryApi queryApi = influxDBClient.getQueryApi();
-        List<FluxTable> tables = queryApi.query(flux, influxOrg);
+        List<FluxTable> tables = new ArrayList<>();
+        for (int attempt = 0; attempt < 3; attempt++) {
+            try {
+                tables = queryApi.query(flux, influxOrg);
+                break;
+            } catch (Exception e) {
+                long sleep = switch (attempt) {
+                    case 0 -> 200L;
+                    case 1 -> 500L;
+                    default -> 1000L;
+                };
+                try {
+                    Thread.sleep(sleep);
+                } catch (InterruptedException ignored) {
+                }
+                if (attempt == 2) {
+                    return List.of();
+                }
+            }
+        }
         Map<String, List<FluxRecord>> bySymbol = new HashMap<>();
         for (FluxTable table : tables) {
             for (FluxRecord rec : table.getRecords()) {

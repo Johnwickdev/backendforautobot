@@ -33,6 +33,7 @@ import com.trader.backend.entity.NseInstrument;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.BulkOperations;
 import com.trader.backend.service.NSEDownloaderService;
 import com.trader.backend.service.ExpirySelectorService;
 
@@ -88,6 +89,7 @@ public class NseInstrumentService {
 
     // ensure heavy CE/PE filtering runs once
     private final AtomicBoolean strikesFiltered = new AtomicBoolean(false);
+    private volatile long lastFutRefreshMs = 0L;
 
     /** Ensure NSE.json is loaded into memory. */
     public synchronized void ensureNseJsonLoaded(boolean force) {
@@ -635,6 +637,7 @@ public List<String> getInstrumentKeysForLiveSubscription() {
 public record SelectionData(long expiry, List<String> keys, int ceCount, int peCount) {}
 
 public SelectionData currentSelectionData() {
+    refreshNiftyFuturesIfNeeded();
     long now = System.currentTimeMillis();
 
     List<Long> expiries = mongoTemplate.findDistinct(
@@ -713,13 +716,17 @@ public void saveNiftyFuturesToMongo() {
 
     );
 
-    // Step 2: Save to separate collection
+    // Step 2: Upsert into separate collection
     if (!niftyFutures.isEmpty()) {
-        mongoTemplate.dropCollection("nifty_futures");
-        mongoTemplate.insert(niftyFutures, "nifty_futures");
+        BulkOperations ops = mongoTemplate.bulkOps(BulkOperations.BulkMode.UNORDERED, NseInstrument.class, "nifty_futures");
+        for (NseInstrument nf : niftyFutures) {
+            ops.replaceOne(new Query(Criteria.where("_id").is(nf.getInstrumentKey())), nf,
+                    new ReplaceOptions().upsert(true));
+        }
+        ops.execute();
         mongoTemplate.indexOps("nifty_futures")
                 .ensureIndex(new org.springframework.data.mongodb.core.index.Index().on("expiry", Sort.Direction.ASC));
-        log.info("💾 Saved to MongoDB collection: nifty_futures (indexed on expiry)");
+        log.info("💾 Upserted {} NIFTY FUT records into MongoDB collection: nifty_futures (indexed on expiry)", niftyFutures.size());
     } else {
         log.warn("⚠️ No matching NIFTY FUT records found.");
     }
@@ -838,10 +845,15 @@ private void refreshNiftyFuturesIfNeeded() {
             .and("name").is("NIFTY")
             .and("expiry").gt(now));
     long count = mongoTemplate.count(q, "nifty_futures");
-    if (count == 0) {
-        log.warn("⚠️ No future NIFTY FUT contracts found. Reloading from JSON...");
-        saveNiftyFuturesToMongo();
+    if (count > 0) {
+        return; // already have valid futures
     }
+    if (now - lastFutRefreshMs < 60_000L) {
+        return; // debounce reload attempts
+    }
+    log.warn("⚠️ No future NIFTY FUT contracts found. Reloading from JSON...");
+    saveNiftyFuturesToMongo();
+    lastFutRefreshMs = now;
 }
 
 public Optional<String> nearestNiftyFutureKey() {

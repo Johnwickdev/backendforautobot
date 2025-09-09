@@ -33,7 +33,6 @@ import com.trader.backend.entity.NseInstrument;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.data.mongodb.core.query.Criteria;
-import org.springframework.data.mongodb.core.BulkOperations;
 import com.trader.backend.service.NSEDownloaderService;
 import com.trader.backend.service.ExpirySelectorService;
 
@@ -50,8 +49,7 @@ import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.stereotype.Service;
-import org.bson.Document;
-import com.mongodb.client.model.ReplaceOptions;
+import org.springframework.data.mongodb.core.FindAndReplaceOptions;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -718,12 +716,11 @@ public void saveNiftyFuturesToMongo() {
 
     // Step 2: Upsert into separate collection
     if (!niftyFutures.isEmpty()) {
-        BulkOperations ops = mongoTemplate.bulkOps(BulkOperations.BulkMode.UNORDERED, NseInstrument.class, "nifty_futures");
+        FindAndReplaceOptions opts = FindAndReplaceOptions.options().upsert().returnNew();
         for (NseInstrument nf : niftyFutures) {
-            ops.replaceOne(new Query(Criteria.where("_id").is(nf.getInstrumentKey())), nf,
-                    new ReplaceOptions().upsert(true));
+            Query q = new Query(Criteria.where("_id").is(nf.getInstrumentKey()));
+            mongoTemplate.findAndReplace(q, nf, opts, NseInstrument.class, "nifty_futures");
         }
-        ops.execute();
         mongoTemplate.indexOps("nifty_futures")
                 .ensureIndex(new org.springframework.data.mongodb.core.index.Index().on("expiry", Sort.Direction.ASC));
         log.info("💾 Upserted {} NIFTY FUT records into MongoDB collection: nifty_futures (indexed on expiry)", niftyFutures.size());
@@ -897,10 +894,9 @@ public Optional<String> nearestNiftyFutureKey() {
     }
 
     // persist chosen contract using upsert to avoid duplicate key errors
-    Document doc = new Document();
-    mongoTemplate.getConverter().write(current, doc);
-    mongoTemplate.getCollection("current_nifty_future")
-            .replaceOne(new Document("_id", doc.get("_id")), doc, new ReplaceOptions().upsert(true));
+    Query replaceQuery = new Query(Criteria.where("_id").is(current.getInstrumentKey()));
+    FindAndReplaceOptions opts = FindAndReplaceOptions.options().upsert().returnNew();
+    mongoTemplate.findAndReplace(replaceQuery, current, opts, NseInstrument.class, "current_nifty_future");
 
     String chosenMonth = extractMonth(current.getTradingSymbol());
     List<String> reasons = new ArrayList<>();

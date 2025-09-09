@@ -176,8 +176,8 @@ public class MdController {
     }
 
     @GetMapping("/sector-trades")
-    public ResponseEntity<List<TradeRow>> sectorTrades(@RequestParam Optional<Integer> limit,
-                                                       @RequestParam Optional<String> side) {
+    public ResponseEntity<Map<String, Object>> sectorTrades(@RequestParam Optional<Integer> limit,
+                                                           @RequestParam Optional<String> side) {
         int lim = limit.orElse(50);
         if (lim < 1 || lim > 200) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "limit");
@@ -193,10 +193,13 @@ public class MdController {
         Optional<TradeHistoryService.Result> resOpt = tradeHistoryService.fetchRecentOptionTrades(lim, s);
         List<TradeRow> rows = resOpt.map(TradeHistoryService.Result::rows).orElse(List.of());
         String src = resOpt.map(TradeHistoryService.Result::source).orElse("none");
-        log.info("GET /md/sector-trades side={} limit={} src={} count={}", s, lim, src, rows.size());
-        return ResponseEntity.ok()
-                .header("X-Source", src)
-                .body(rows);
+        boolean degraded = "none".equals(src);
+        log.info("GET /md/sector-trades side={} limit={} src={} count={} degraded={}", s, lim, src, rows.size(), degraded);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("items", rows);
+        body.put("source", src);
+        body.put("degraded", degraded);
+        return ResponseEntity.ok(body);
     }
 
     @PostMapping("/admin/options/refresh")

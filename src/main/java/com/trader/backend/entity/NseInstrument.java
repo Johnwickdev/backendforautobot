@@ -14,7 +14,6 @@ public class NseInstrument {
 
     @Id
     @JsonProperty("instrument_key")
-    @Field("instrument_key")
     private String instrumentKey;
 
     @JsonProperty("weekly")

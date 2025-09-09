@@ -2,12 +2,15 @@ package com.trader.backend.config;
 
 import com.influxdb.client.InfluxDBClient;
 import com.influxdb.client.InfluxDBClientFactory;
+import com.influxdb.client.InfluxDBClientOptions;
 import com.influxdb.client.WriteApiBlocking;
+import okhttp3.OkHttpClient;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import java.time.Duration;
 
 @Configuration
 public class InfluxConfig {
@@ -30,8 +33,17 @@ public class InfluxConfig {
     @Bean
     @ConditionalOnProperty(prefix = "influx", name = "url")
     public InfluxDBClient influxDBClient() {
-        // note: token must be passed as char[] for security
-        return InfluxDBClientFactory.create(url, token.toCharArray(), org, bucket);
+        OkHttpClient.Builder http = new OkHttpClient.Builder()
+                .connectTimeout(Duration.ofSeconds(10))
+                .readTimeout(Duration.ofSeconds(10));
+        InfluxDBClientOptions options = InfluxDBClientOptions.builder()
+                .url(url)
+                .authenticateToken(token.toCharArray())
+                .org(org)
+                .bucket(bucket)
+                .okHttpClient(http)
+                .build();
+        return InfluxDBClientFactory.create(options);
     }
 
     /**

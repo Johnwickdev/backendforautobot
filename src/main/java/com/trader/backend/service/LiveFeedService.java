@@ -78,6 +78,7 @@ private final AtomicBoolean optionsStreamStarted = new AtomicBoolean(false);
     private final AtomicBoolean connected = new AtomicBoolean(false);
     private final AtomicBoolean everConnected = new AtomicBoolean(false);
     private final AtomicBoolean futSubscribed = new AtomicBoolean(false);
+    private final AtomicBoolean futLtpInitialized = new AtomicBoolean(false);
     private final AtomicInteger optSubscribedCount = new AtomicInteger(0);
     private final AtomicLong ticksLast60s = new AtomicLong();
     private final AtomicReference<Instant> lastTickTs = new AtomicReference<>(null);
@@ -161,6 +162,7 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
                     log.warn("Auth token expired or refresh failed; waiting for re-login");
                     orchestratorState.set(OrchestratorState.IDLE);
                     selectionComputed.set(false);
+                    futLtpInitialized.set(false);
                 });
 
         Flux.interval(Duration.ofSeconds(15))
@@ -718,6 +720,9 @@ public void streamNiftyFutAndTriggerCEPE() {
     }
     String instrumentKey = optKey.get();
     log.info("📦 Subscribing to NIFTY FUT: {}", instrumentKey);
+    futLtpInitialized.set(false);
+    long start = System.currentTimeMillis();
+    AtomicBoolean warned = new AtomicBoolean(false);
 
     fetchWebSocketUrl()
             .flatMapMany(wsUrl -> openWebSocketForOptions(wsUrl, buildSubFrame(instrumentKey)))
@@ -741,7 +746,8 @@ public void streamNiftyFutAndTriggerCEPE() {
                         lastTick.put(instrumentKey, new Tick(instrumentKey, ltp, Instant.ofEpochMilli(ts)));
                         bufferOptionTick(instrumentKey, feed, ts, ltp);
 
-                        if (selectionComputed.compareAndSet(false, true)) {
+                        if (futLtpInitialized.compareAndSet(false, true)) {
+                            selectionComputed.set(true);
                             nseInstrumentService.filterStrikesAroundLtpFromJson(ltp);
                             NseInstrumentService.SelectionData sel = nseInstrumentService.currentSelectionData();
                             String sig = nseInstrumentService.selectionSignature(sel);
@@ -756,8 +762,13 @@ public void streamNiftyFutAndTriggerCEPE() {
                                         sel.ceCount(), sel.peCount(), sel.keys().size());
                             }
                         }
-                    } else {
-                        log.warn("⚠️ LTP not found in tick — instrumentKey={}", instrumentKey);
+                    } else if (!futLtpInitialized.get()) {
+                        long elapsed = System.currentTimeMillis() - start;
+                        if (elapsed > 500 && warned.compareAndSet(false, true)) {
+                            log.warn("⚠️ LTP not found in tick — instrumentKey={}", instrumentKey);
+                        } else {
+                            log.debug("Waiting for FUT LTP...");
+                        }
                     }
                 } catch (Exception ex) {
                     log.error("⚠️ Failed to extract LTP or trigger filtering", ex);
@@ -862,10 +873,16 @@ private Flux<JsonNode> openWebSocketWithDynamicSub(String wsUrl, java.util.funct
 
     private void writeTickToInflux(String instrumentKey, JsonNode feed, long ts) {
         lastTickTs.set(Instant.ofEpochMilli(ts));
-        if (writeApi == null) return;
+        if (writeApi == null) {
+            log.debug("Skipping Influx write (no client)");
+            return;
+        }
         NseInstrument info = instrumentCache.computeIfAbsent(instrumentKey,
                 k -> mongoTemplate.findById(k, NseInstrument.class));
-        if (info == null) return;
+        if (info == null) {
+            log.debug("Skipping Influx write (unknown instrument): {}", instrumentKey);
+            return;
+        }
         boolean isFut = info.getInstrumentType() != null && info.getInstrumentType().toUpperCase().contains("FUT");
         String measurement = isFut ? "nifty_fut_ltp" : "nifty_option_ticks";
 
@@ -902,7 +919,7 @@ private Flux<JsonNode> openWebSocketWithDynamicSub(String wsUrl, java.util.funct
             writeApi.writePoint(influxBucket, influxOrg, p);
             if (isFut) futWrites.incrementAndGet(); else optWrites.incrementAndGet();
         } catch (Exception e) {
-            // ignore write failures but do not block main loop
+            log.debug("Influx write failed for {}: {}", instrumentKey, e.getMessage());
         }
     }
 

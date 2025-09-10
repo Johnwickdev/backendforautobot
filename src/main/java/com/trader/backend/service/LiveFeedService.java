@@ -348,21 +348,20 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
         Sinks.Many<JsonNode> local = Sinks.many().multicast().onBackpressureBuffer();
 
         client.execute(URI.create(wsUrl), session -> {
-            Flux<WebSocketMessage> keepAlive =
-                    Flux.interval(Duration.ofSeconds(30))
-                            .map(i -> session.pingMessage(factory -> factory.wrap(new byte[0])));
-
-            Flux<WebSocketMessage> subscribeFrame = Flux.just(
+            Flux<WebSocketMessage> subscribeFrames = Flux.just(
                     session.binaryMessage(bb -> bb.wrap(SUB_FRAME))
             );
 
-            return session.send(Flux.merge(subscribeFrame, keepAlive))
+            Flux<WebSocketMessage> outbound = Flux.merge(subscribeFrames, keepAlive(session));
+
+            return session
+                    .send(outbound)
                     .doOnSuccess(v -> log.info("▶︎ subscribe frame sent"))
-                    .thenMany(session.receive()
+                    .and(session.receive()
                             .map(WebSocketMessage::getPayload)
                             .map(this::parseProtoFeedResponse)
-                            .doOnNext(local::tryEmitNext))
-                    .then();
+                            .doOnNext(local::tryEmitNext)
+                            .then());
         }).subscribe();
 
         return local.asFlux();
@@ -519,17 +518,16 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
             @Override
             public void run() {
                 client.execute(URI.create(wsUrl), session -> {
-                    Flux<WebSocketMessage> keepAlive =
-                            Flux.interval(Duration.ofSeconds(30))
-                                    .map(i -> session.pingMessage(factory -> factory.wrap(new byte[0])));
-
-                    Flux<WebSocketMessage> subscribeFrame = Flux.just(
+                    Flux<WebSocketMessage> subscribeFrames = Flux.just(
                             session.binaryMessage(bb -> bb.wrap(subFrame))
                     );
 
-                    return session.send(Flux.merge(subscribeFrame, keepAlive))
+                    Flux<WebSocketMessage> outbound = Flux.merge(subscribeFrames, keepAlive(session));
+
+                    return session
+                            .send(outbound)
                             .doOnSuccess(v -> log.info("▶︎ Nifty options subscription frame sent"))
-                            .thenMany(session.receive()
+                            .and(session.receive()
                                     .map(WebSocketMessage::getPayload)
                                     .map(LiveFeedService.this::parseProtoFeedResponse)
                                     .doOnNext(local::tryEmitNext)
@@ -539,8 +537,7 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
                                 int delay = nextDelay(attempt.incrementAndGet());
                                 log.info("LIVE DISCONNECTED → reconnect in {}s", delay);
                                 Mono.delay(Duration.ofSeconds(delay)).subscribe(i -> run());
-                            })
-                            .then();
+                            });
                 }).subscribe();
             }
         };
@@ -567,21 +564,20 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
         Sinks.Many<JsonNode> local = Sinks.many().multicast().onBackpressureBuffer();
 
         client.execute(URI.create(wsUrl), session -> {
-            Flux<WebSocketMessage> keepAlive =
-                    Flux.interval(Duration.ofSeconds(30))
-                            .map(i -> session.pingMessage(factory -> factory.wrap(new byte[0])));
-
-            Flux<WebSocketMessage> subscribeFrame = Flux.just(
+            Flux<WebSocketMessage> subscribeFrames = Flux.just(
                     session.binaryMessage(bb -> bb.wrap(OPTION_SUB_FRAME))
             );
 
-            return session.send(Flux.merge(subscribeFrame, keepAlive))
+            Flux<WebSocketMessage> outbound = Flux.merge(subscribeFrames, keepAlive(session));
+
+            return session
+                    .send(outbound)
                     .doOnSuccess(v -> log.info("▶︎ option‐subscribe frame sent"))
-                    .thenMany(session.receive()
+                    .and(session.receive()
                             .map(WebSocketMessage::getPayload)
                             .map(this::parseProtoFeedResponse)
-                            .doOnNext(local::tryEmitNext))
-                    .then();
+                            .doOnNext(local::tryEmitNext)
+                            .then());
         }).subscribe();
 
         return local.asFlux();
@@ -592,6 +588,12 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
                 .option(ChannelOption.SO_KEEPALIVE, true)
                 .responseTimeout(Duration.ofSeconds(20));
         return new ReactorNettyWebSocketClient(httpClient);
+    }
+
+    // --- KEEP-ALIVE HELPERS ---
+    private static Flux<WebSocketMessage> keepAlive(WebSocketSession session) {
+        return Flux.interval(Duration.ofSeconds(30))
+                .map(i -> session.pingMessage(factory -> factory.wrap(new byte[0])));
     }
 
     private int nextDelay(int attempt) {
@@ -872,22 +874,20 @@ private Flux<JsonNode> openWebSocketWithDynamicSub(java.util.function.Supplier<b
                     HttpHeaders headers = new HttpHeaders();
                     headers.setBearerAuth(auth.currentToken());
                     return client.execute(URI.create(wsUrl), headers, session -> {
-                            Flux<WebSocketMessage> keepAlive =
-                                    Flux.interval(Duration.ofSeconds(30))
-                                            .map(i -> session.pingMessage(factory -> factory.wrap(new byte[0])));
-
-                            Flux<WebSocketMessage> subs;
+                            Flux<WebSocketMessage> subscribeFrames;
                             String futKey = futInstrumentKey.get();
                             if (futKey != null) {
-                                subs = Flux.concat(
+                                subscribeFrames = Flux.concat(
                                         Mono.just(session.binaryMessage(bb -> bb.wrap(buildSubFrame(futKey)))),
                                         Mono.just(session.binaryMessage(bb -> bb.wrap(frameSupplier.get()))));
                             } else {
-                                subs = Flux.just(session.binaryMessage(bb -> bb.wrap(frameSupplier.get())));
+                                subscribeFrames = Flux.just(session.binaryMessage(bb -> bb.wrap(frameSupplier.get())));
                             }
 
+                            Flux<WebSocketMessage> outbound = Flux.merge(subscribeFrames, keepAlive(session));
+
                             return session
-                                    .send(Flux.merge(subs, keepAlive))
+                                    .send(outbound)
                                     .doOnSuccess(v -> {
                                         futSubscribed.set(futKey != null);
                                         int total = subsCount + (futSubscribed.get() ? 1 : 0);

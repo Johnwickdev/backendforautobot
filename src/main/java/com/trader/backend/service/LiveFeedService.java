@@ -607,7 +607,6 @@ public class LiveFeedService {
                 .retryWhen(Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(5)))
                 .doOnSubscribe(s -> log.info("📡 Subscribed to filtered CE/PE (auto-resub on reconnect)"))
                 .doOnNext(tick -> {
-                    sink.tryEmitNext(tick);
                     JsonNode feeds = tick.path("feeds");
                     feeds.fields().forEachRemaining(entry -> {
                         String instrumentKey = entry.getKey();
@@ -616,9 +615,18 @@ public class LiveFeedService {
                         if (ltpNode.isNumber()) {
                             double ltp = ltpNode.asDouble();
                             long ts = extractTimestamp(feed, tick);
+
+                            // 1) emit
                             ltpSink.tryEmitNext(new LtpEvent(instrumentKey, ltp, Instant.ofEpochMilli(ts)));
+                            sink.tryEmitNext(tick);
+
+                            // 2) log
                             logLtp(instrumentKey, ltp, ts);
+
+                            // 3) store
                             writeTickToInflux(instrumentKey, feed, ts);
+
+                            // 4) cache
                             lastTick.put(instrumentKey, new Tick(instrumentKey, ltp, Instant.ofEpochMilli(ts)));
                             bufferOptionTick(instrumentKey, feed, ts, ltp);
 
@@ -671,13 +679,21 @@ public class LiveFeedService {
                         if (!ltpNode.isMissingNode()) {
                             double ltp = ltpNode.asDouble();
                             long ts = extractTimestamp(tick.path("feeds").path(instrumentKey), tick);
-                            logLtp(instrumentKey, ltp, ts);
+
+                            // 1) emit
                             ltpSink.tryEmitNext(new LtpEvent(instrumentKey, ltp, Instant.ofEpochMilli(ts)));
+                            sink.tryEmitNext(tick);
+
+                            // 2) log
+                            logLtp(instrumentKey, ltp, ts);
+
+                            // 3) store
                             writeTickToInflux(instrumentKey, tick.path("feeds").path(instrumentKey), ts);
+
+                            // 4) cache
                             lastTick.put(instrumentKey, new Tick(instrumentKey, ltp, Instant.ofEpochMilli(ts)));
                             bufferOptionTick(instrumentKey, tick.path("feeds").path(instrumentKey), ts, ltp);
                         }
-                        sink.tryEmitNext(tick);
                     } catch (Exception e) {
                         log.error("❌ Error parsing tick JSON or filtering: ", e);
                     }
@@ -744,9 +760,18 @@ public class LiveFeedService {
                         if (ltpNode.isNumber()) {
                             double ltp = ltpNode.asDouble();
                             long ts = extractTimestamp(feed, tick);
+
+                            // 1) emit
                             ltpSink.tryEmitNext(new LtpEvent(instrumentKey, ltp, Instant.ofEpochMilli(ts)));
+                            sink.tryEmitNext(tick);
+
+                            // 2) log
                             logLtp(instrumentKey, ltp, ts);
+
+                            // 3) store
                             writeTickToInflux(instrumentKey, feed, ts);
+
+                            // 4) cache
                             lastTick.put(instrumentKey, new Tick(instrumentKey, ltp, Instant.ofEpochMilli(ts)));
                             bufferOptionTick(instrumentKey, feed, ts, ltp);
 
@@ -949,6 +974,10 @@ public class LiveFeedService {
     }
 
     private void writeTickToInflux(String instrumentKey, JsonNode feed, long ts) {
+        if (!connected.get()) {
+            // Only persist when on live WS; still logging and emitting above.
+            return;
+        }
         lastTickTs.set(Instant.ofEpochMilli(ts));
         if (writeApi == null) {
             log.debug("Skipping Influx write (no client)");

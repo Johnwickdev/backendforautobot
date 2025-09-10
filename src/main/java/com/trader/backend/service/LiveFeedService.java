@@ -1,7 +1,5 @@
 package com.trader.backend.service;
 
-
-
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -11,11 +9,19 @@ import com.influxdb.client.WriteApiBlocking;
 import com.influxdb.client.domain.WritePrecision;
 import com.influxdb.client.write.Point;
 import com.trader.backend.entity.NseInstrument;
-import com.upstox.marketdatafeederv3udapi.rpc.proto.MarketDataFeed;
+import com.trader.backend.events.LtpEvent;
+import io.netty.handler.codec.http.websocketx.WebSocketClientHandshakeException;
+
+
+import com.upstox.marketdatafeeder.rpc.proto.MarketDataFeed;
+import io.netty.channel.ChannelOption;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.socket.WebSocketMessage;
@@ -25,40 +31,25 @@ import reactor.core.Exceptions;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
-import reactor.util.retry.Retry;
 import reactor.netty.http.client.HttpClient;
-import io.netty.channel.ChannelOption;
+import reactor.util.retry.Retry;
 
 import javax.annotation.PostConstruct;
 import java.net.URI;
-import java.time.Duration;
-
-import org.springframework.core.io.buffer.DataBuffer;
-import org.springframework.http.HttpHeaders;
-import org.springframework.beans.factory.annotation.Value;
-
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Locale;
-import java.util.Optional;
-import java.util.Set;
-import java.util.HashSet;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.Map;
-import com.trader.backend.events.LtpEvent;
-
 
 @Service
 @Slf4j
@@ -73,10 +64,12 @@ public class LiveFeedService {
     private final ObjectMapper om = new ObjectMapper();
     private final MongoTemplate mongoTemplate;
     private final QuantAnalysisService quantAnalysisService;
+
     @Value("${app.mock:false}")
     private boolean mockMode;
-private final Sinks.Many<JsonNode> sink = Sinks.many().multicast().onBackpressureBuffer();
-private final AtomicBoolean optionsStreamStarted = new AtomicBoolean(false);
+
+    private final Sinks.Many<JsonNode> sink = Sinks.many().multicast().onBackpressureBuffer();
+    private final AtomicBoolean optionsStreamStarted = new AtomicBoolean(false);
 
     private final AtomicBoolean connected = new AtomicBoolean(false);
     private final AtomicBoolean everConnected = new AtomicBoolean(false);
@@ -91,15 +84,14 @@ private final AtomicBoolean optionsStreamStarted = new AtomicBoolean(false);
     // remember current FUT instrument for resubscription
     private final AtomicReference<String> futInstrumentKey = new AtomicReference<>(null);
 
-private final AtomicLong lastAutoStartLog = new AtomicLong(0);
-
+    private final AtomicLong lastAutoStartLog = new AtomicLong(0);
     private final AtomicBoolean marketWasOpen = new AtomicBoolean(false);
 
-public enum OrchestratorState { IDLE, RUNNING, READY }
-private final AtomicReference<OrchestratorState> orchestratorState = new AtomicReference<>(OrchestratorState.IDLE);
-private final AtomicReference<String> lastSelectionSignature = new AtomicReference<>(null);
-private final AtomicBoolean selectionComputed = new AtomicBoolean(false);
-private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet();
+    public enum OrchestratorState { IDLE, RUNNING, READY }
+    private final AtomicReference<OrchestratorState> orchestratorState = new AtomicReference<>(OrchestratorState.IDLE);
+    private final AtomicReference<String> lastSelectionSignature = new AtomicReference<>(null);
+    private final AtomicBoolean selectionComputed = new AtomicBoolean(false);
+    private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet();
 
     private final ConcurrentHashMap<String, Tick> lastTick = new ConcurrentHashMap<>();
     private final AtomicBoolean instrumentsInitialized = new AtomicBoolean(false);
@@ -107,26 +99,11 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
     private final AtomicInteger peLoadedCount = new AtomicInteger(0);
     private final AtomicLong currentExpiryMs = new AtomicLong(0);
 
-    public Optional<Tick> getLatestTick(String key) {
-        return Optional.ofNullable(lastTick.get(key));
-    }
-
-    public Double getLatestLtp(String key) {
-        return getLatestTick(key).map(Tick::ltp).orElse(null);
-    }
-
-    public Set<String> cachedKeys() {
-        return lastTick.keySet();
-    }
-
-    public boolean isMarketOpen() {
-        return MarketHours.isOpen(Instant.now());
-    }
-
-    public boolean hasRecentFutWrites() {
-        return futWrites.get() > 0;
-    }
-
+    public Optional<Tick> getLatestTick(String key) { return Optional.ofNullable(lastTick.get(key)); }
+    public Double getLatestLtp(String key) { return getLatestTick(key).map(Tick::ltp).orElse(null); }
+    public Set<String> cachedKeys() { return lastTick.keySet(); }
+    public boolean isMarketOpen() { return MarketHours.isOpen(Instant.now()); }
+    public boolean hasRecentFutWrites() { return futWrites.get() > 0; }
     public boolean isConnected() { return connected.get(); }
     public Instant lastTickTs() { return lastTickTs.get(); }
     public long ticksLast60s() { return ticksLast60s.get(); }
@@ -148,12 +125,10 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
     private final Map<String, ConcurrentLinkedDeque<OptTick>> optionBuffers = new ConcurrentHashMap<>();
 
     public record OptTick(Instant ts, String instrumentKey, String symbol, double ltp, int qty, int oi) {}
-    /**
-     * Exposed for your controllers to subscribe
-     **/
-    public Flux<JsonNode> stream() {
-        return sink.asFlux();
-    }
+
+    /** Exposed for your controllers to subscribe */
+    public Flux<JsonNode> stream() { return sink.asFlux(); }
+
     @PostConstruct
     public void subscribeToAuthEvents() {
         if (writeApi == null) {
@@ -231,9 +206,7 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
         }
     }
 
-    public void startLive() {
-        initLiveWebSocket();
-    }
+    public void startLive() { initLiveWebSocket(); }
 
     private void ensureOptionStream() {
         NseInstrumentService.OptionBatch batch = nseInstrumentService.loadCurrentWeekOptionInstruments();
@@ -261,9 +234,7 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
         streamFilteredNiftyOptions();
     }
 
-    /**
-     * Public entry to start or resume feeds ensuring option instruments exist.
-     */
+    /** Public entry to start or resume feeds ensuring option instruments exist. */
     public void startOrResume() {
         ZonedDateTime nowIst = ZonedDateTime.now(MarketHours.zone());
         nseInstrumentService.ensureOptionsLoaded(nowIst);
@@ -301,9 +272,7 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
         }
     }
 
-    /**
-     * STEP 6.1: fetch the actual WS URL (handles redirect or JSON token)
-     **/
+    /** STEP 6.1: fetch the actual WS URL (handles redirect or JSON token) */
     public Mono<String> fetchWebSocketUrl() {
         log.info("⟳ entering fetchWebSocketUrl(), current token={}", auth.currentToken());
         return WebClient.builder()
@@ -312,20 +281,13 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
                 .get()
                 .uri("https://api.upstox.com/v3/feed/market-data-feed/authorize")
                 .exchangeToMono(resp -> {
-                    // 1) if they give a redirect, just grab it
                     if (resp.statusCode().is3xxRedirection()) {
-                        String redirect = resp.headers()
-                                .asHttpHeaders()
-                                .getLocation()
-                                .toString();
+                        String redirect = resp.headers().asHttpHeaders().getLocation().toString();
                         return Mono.just(redirect);
                     }
-
-
                     return resp.bodyToMono(JsonNode.class)
                             .flatMap(j -> {
                                 log.debug("→ /authorize JSON payload: {}", j);
-                                // pull out the wss:// URI directly
                                 JsonNode data = j.path("data");
                                 String wsUrl = data.has("authorizedRedirectUri")
                                         ? data.get("authorizedRedirectUri").asText()
@@ -335,7 +297,6 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
                             });
                 });
     }
-
 
     private static final byte[] SUB_FRAME = """
             {"guid":"someguid","method":"sub",
@@ -367,22 +328,15 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
         return local.asFlux();
     }
 
-    /**
-     * replace your old parseProtoTick with this:
-     **/
+    /** replace your old parseProtoTick with this: */
     private JsonNode parseProtoFeedResponse(DataBuffer buf) {
         try {
             byte[] b = new byte[buf.readableByteCount()];
             buf.read(b);
-
-            // Upstox sample parses FeedResponse
             var resp = MarketDataFeed.FeedResponse.parseFrom(b);
-
-            // convert to JSON with protobuf’s JsonFormat
             String json = JsonFormat.printer()
                     .omittingInsignificantWhitespace()
                     .print(resp);
-
             return om.readTree(json);
         } catch (Exception ex) {
             throw Exceptions.propagate(ex);
@@ -390,23 +344,21 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
     }
 
     private Point toPoint(JsonNode tick) {
-        // 1) discover the instrument key (first field under "feeds")
         JsonNode feeds = tick.path("feeds");
         Iterator<String> it = feeds.fieldNames();
         String instr = it.hasNext() ? it.next() : "UNKNOWN";
 
-        // 2) pick timestamp: currentTs if present, else now()
         long tms = tick.hasNonNull("currentTs")
                 ? tick.get("currentTs").asLong()
                 : Instant.now().toEpochMilli();
 
-        // 3) build your InfluxDB point, saving the whole JSON as a string
         return Point
                 .measurement("ticks")
                 .addTag("instrument", instr)
                 .time(Instant.ofEpochMilli(tms), WritePrecision.MS)
                 .addField("raw", tick.toString());
     }
+
     public void setupNiftyOptionsLiveFeed() {
         log.info("🚀 Starting Nifty Option Chain setup...");
         log.info("🚀 [INIT] setupNiftyOptionsLiveFeed() CALLED");
@@ -508,7 +460,6 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
                 );
     }
 
-
     public Flux<JsonNode> openWebSocketForOptions(String wsUrl, byte[] subFrame) {
         ReactorNettyWebSocketClient client = createWsClient();
         Sinks.Many<JsonNode> local = Sinks.many().multicast().onBackpressureBuffer();
@@ -521,7 +472,6 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
                     Flux<WebSocketMessage> subscribeFrames = Flux.just(
                             session.binaryMessage(bb -> bb.wrap(subFrame))
                     );
-
                     Flux<WebSocketMessage> outbound = Flux.merge(subscribeFrames, keepAlive(session));
 
                     return session
@@ -543,9 +493,9 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
         };
 
         connect.run();
-
         return local.asFlux();
     }
+
     // inside LiveFeedService.java (below your existing SUB_FRAME):
     private static final byte[] OPTION_SUB_FRAME = """
     {
@@ -559,6 +509,7 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
       }
     }
     """.getBytes(StandardCharsets.UTF_8);
+
     private Flux<JsonNode> openOptionWebSocket(String wsUrl) {
         ReactorNettyWebSocketClient client = createWsClient();
         Sinks.Many<JsonNode> local = Sinks.many().multicast().onBackpressureBuffer();
@@ -606,347 +557,339 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
         };
     }
 
-public void streamFilteredNiftyOptions() {
-    NseInstrumentService.SelectionData sel = nseInstrumentService.currentSelectionData();
-    ceLoadedCount.set(sel.ceCount());
-    peLoadedCount.set(sel.peCount());
-    currentExpiryMs.set(sel.expiry());
-    List<String> desired = sel.keys();
-    String futKey = nseInstrumentService.nearestNiftyFutureKey().orElse(null);
-    if (futKey != null) {
-        futInstrumentKey.set(futKey);
-    }
-    List<String> optionKeys = desired.stream()
-            .filter(k -> !k.equals(futKey))
-            .toList();
-    if (desired.isEmpty()) {
-        log.info("OPTION-STREAM wait: no instruments yet (will retry)");
-        optionsStreamStarted.set(false);
-        Mono.delay(Duration.ofSeconds(30)).subscribe(i -> streamFilteredNiftyOptions());
-        return;
-    }
-    Set<String> toAdd = new HashSet<>(desired);
-    toAdd.removeAll(currentlySubscribedKeys);
-    Set<String> toRemove = new HashSet<>(currentlySubscribedKeys);
-    toRemove.removeAll(new HashSet<>(desired));
+    public void streamFilteredNiftyOptions() {
+        NseInstrumentService.SelectionData sel = nseInstrumentService.currentSelectionData();
+        ceLoadedCount.set(sel.ceCount());
+        peLoadedCount.set(sel.peCount());
+        currentExpiryMs.set(sel.expiry());
+        List<String> desired = sel.keys();
+        String futKey = nseInstrumentService.nearestNiftyFutureKey().orElse(null);
+        if (futKey != null) {
+            futInstrumentKey.set(futKey);
+        }
+        List<String> optionKeys = desired.stream().filter(k -> !k.equals(futKey)).toList();
+        if (desired.isEmpty()) {
+            log.info("OPTION-STREAM wait: no instruments yet (will retry)");
+            optionsStreamStarted.set(false);
+            Mono.delay(Duration.ofSeconds(30)).subscribe(i -> streamFilteredNiftyOptions());
+            return;
+        }
+        Set<String> toAdd = new HashSet<>(desired);
+        toAdd.removeAll(currentlySubscribedKeys);
+        Set<String> toRemove = new HashSet<>(currentlySubscribedKeys);
+        toRemove.removeAll(new HashSet<>(desired));
 
-    if (toAdd.isEmpty() && toRemove.isEmpty() && optionsStreamStarted.get()) {
-        log.info("Orchestration skipped — selection unchanged (expiry={})",
-                nseInstrumentService.formatExpiry(sel.expiry()));
-        return;
-    }
+        if (toAdd.isEmpty() && toRemove.isEmpty() && optionsStreamStarted.get()) {
+            log.info("Orchestration skipped — selection unchanged (expiry={})",
+                    nseInstrumentService.formatExpiry(sel.expiry()));
+            return;
+        }
 
-    currentlySubscribedKeys.addAll(toAdd);
-    currentlySubscribedKeys.removeAll(toRemove);
-    log.info("Subscriptions updated: +{} / -{} (total={})", toAdd.size(), toRemove.size(), desired.size());
+        currentlySubscribedKeys.addAll(toAdd);
+        currentlySubscribedKeys.removeAll(toRemove);
+        log.info("Subscriptions updated: +{} / -{} (total={})", toAdd.size(), toRemove.size(), desired.size());
 
-    if (!optionsStreamStarted.compareAndSet(false, true)) {
-        return;
-    }
+        if (!optionsStreamStarted.compareAndSet(false, true)) {
+            return;
+        }
 
-    log.info("OPTION-STREAM started keys={} expiry={}", desired.size(), sel.expiry());
+        log.info("OPTION-STREAM started keys={} expiry={}", desired.size(), sel.expiry());
 
-    auth.ensureValidToken()
-        .flatMapMany(valid -> {
-            if (!valid) {
-                optionsStreamStarted.set(false);
-                log.warn("⚠️ Upstox token not ready — skipping option stream start");
-                return Flux.empty();
-            }
-            return openWebSocketWithDynamicSub(() -> buildSubFrame(optionKeys), optionKeys.size());
-        })
-        .retryWhen(Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(5)))
-        .doOnSubscribe(s -> log.info("📡 Subscribed to filtered CE/PE (auto-resub on reconnect)"))
-        .doOnNext(tick -> {
-            sink.tryEmitNext(tick);
-            JsonNode feeds = tick.path("feeds");
-            feeds.fields().forEachRemaining(entry -> {
-                String instrumentKey = entry.getKey();
-                JsonNode feed = entry.getValue();
-                JsonNode ltpNode = feed
-                        .path("fullFeed")
-                        .path("marketFF")
-                        .path("ltpc")
-                        .path("ltp");
-                if (ltpNode.isNumber()) {
-                    double ltp = ltpNode.asDouble();
-                    long ts = extractTimestamp(feed, tick);
-                    ltpSink.tryEmitNext(new LtpEvent(instrumentKey, ltp, Instant.ofEpochMilli(ts)));
-                    logLtp(instrumentKey, ltp, ts);
-                    writeTickToInflux(instrumentKey, feed, ts);
-                    lastTick.put(instrumentKey, new Tick(instrumentKey, ltp, Instant.ofEpochMilli(ts)));
-                    bufferOptionTick(instrumentKey, feed, ts, ltp);
-
-                    var result = quantAnalysisService.analyze(instrumentKey, feed);
-                    if (result.signal() != QuantAnalysisService.Signal.NONE) {
-                        log.info("🎯 {} for {} → momentum={} volSpike={} imbalance={} noise={}",
-                                result.signal(), instrumentKey,
-                                String.format("%.4f", result.momentum()),
-                                String.format("%.2f", result.volumeSpike()),
-                                String.format("%.4f", result.imbalance()),
-                                String.format("%.2f", result.noise()));
+        auth.ensureValidToken()
+                .flatMapMany(valid -> {
+                    if (!valid) {
+                        optionsStreamStarted.set(false);
+                        log.warn("⚠️ Upstox token not ready — skipping option stream start");
+                        return Flux.empty();
                     }
-                }
-            });
-        })
-        .doOnError(err -> {
-            optionsStreamStarted.set(false);
-            log.error("❌ filtered option feed failed:", err);
-        })
-        .doFinally(sig -> {
-            optionsStreamStarted.set(false);
-            log.info("🧹 filtered CE/PE stream terminated: {}", sig);
-        })
-        .subscribe();
-}
-public void streamSingleInstrument(String instrumentKey) {
-    log.info("🚀 Starting live stream for instrument → {}", instrumentKey);
+                    return openWebSocketWithDynamicSub(() -> buildSubFrame(optionKeys), optionKeys.size());
+                })
+                .retryWhen(Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(5)))
+                .doOnSubscribe(s -> log.info("📡 Subscribed to filtered CE/PE (auto-resub on reconnect)"))
+                .doOnNext(tick -> {
+                    sink.tryEmitNext(tick);
+                    JsonNode feeds = tick.path("feeds");
+                    feeds.fields().forEachRemaining(entry -> {
+                        String instrumentKey = entry.getKey();
+                        JsonNode feed = entry.getValue();
+                        JsonNode ltpNode = feed.path("fullFeed").path("marketFF").path("ltpc").path("ltp");
+                        if (ltpNode.isNumber()) {
+                            double ltp = ltpNode.asDouble();
+                            long ts = extractTimestamp(feed, tick);
+                            ltpSink.tryEmitNext(new LtpEvent(instrumentKey, ltp, Instant.ofEpochMilli(ts)));
+                            logLtp(instrumentKey, ltp, ts);
+                            writeTickToInflux(instrumentKey, feed, ts);
+                            lastTick.put(instrumentKey, new Tick(instrumentKey, ltp, Instant.ofEpochMilli(ts)));
+                            bufferOptionTick(instrumentKey, feed, ts, ltp);
 
-    // Step 1: Create a sub frame
-    ObjectNode frame = om.createObjectNode();
-    frame.put("guid", "single-instrument-guid");
-    frame.put("method", "sub");
-
-    ObjectNode data = frame.putObject("data");
-    data.put("mode", "full");
-    data.putArray("instrumentKeys").add(instrumentKey);
-
-    byte[] subFrame = frame.toString().getBytes(StandardCharsets.UTF_8);
-
-    // Step 2: Connect and stream
-    fetchWebSocketUrl()
-        .flatMapMany(wsUrl -> openWebSocketForOptions(wsUrl, subFrame))
-        .doOnNext(tick -> {
-            try {
-                // ✅ Parse LTP from incoming tick
-                // ✅ Correct path:
-JsonNode ltpNode = tick.path("feeds")
-    .path(instrumentKey)
-    .path("fullFeed")
-    .path("marketFF")
-    .path("ltpc")
-    .path("ltp");
-                if (!ltpNode.isMissingNode()) {
-                    double ltp = ltpNode.asDouble();
-                    long ts = extractTimestamp(tick.path("feeds").path(instrumentKey), tick);
-                    logLtp(instrumentKey, ltp, ts);
-                    ltpSink.tryEmitNext(new LtpEvent(instrumentKey, ltp, Instant.ofEpochMilli(ts)));
-                    writeTickToInflux(instrumentKey, tick.path("feeds").path(instrumentKey), ts);
-                    lastTick.put(instrumentKey, new Tick(instrumentKey, ltp, Instant.ofEpochMilli(ts)));
-                    bufferOptionTick(instrumentKey, tick.path("feeds").path(instrumentKey), ts, ltp);
-                }
-
-                sink.tryEmitNext(tick);
-            } catch (Exception e) {
-                log.error("❌ Error parsing tick JSON or filtering: ", e);
-            }
-        })
-        .doOnError(err -> log.error("❌ WebSocket stream failed:", err))
-        .subscribe();
-}
-
-public byte[] buildSubFrame(String instrumentKey) {
-    ObjectNode frame = om.createObjectNode();
-    frame.put("guid", "nifty-fut-guid");
-    frame.put("method", "sub");
-
-    ObjectNode data = frame.putObject("data");
-    data.put("mode", "full");
-    data.putArray("instrumentKeys").add(instrumentKey);
-
-    return frame.toString().getBytes(StandardCharsets.UTF_8);
-}
-
-private byte[] buildSubFrame(List<String> keys) {
-    ObjectNode frame = om.createObjectNode();
-    frame.put("guid", "filtered-options-guid");
-    frame.put("method", "sub");
-
-    ObjectNode data = frame.putObject("data");
-    data.put("mode", "full");
-    ArrayNode arr = data.putArray("instrumentKeys");
-    keys.forEach(arr::add);
-
-    return frame.toString().getBytes(StandardCharsets.UTF_8);
-}
-public MongoTemplate getMongoTemplate() {
-    return mongoTemplate;
-}
-public void streamNiftyFutAndTriggerCEPE() {
-    log.info("🚀 Subscribing to NIFTY FUT to extract LTP and filter CE/PE...");
-
-    if (auth.currentToken() == null) {
-        log.warn("⚠️ Cannot start NIFTY FUT stream — token not available");
-        return;
-    }
-
-    Optional<String> optKey = nseInstrumentService.nearestNiftyFutureKey();
-    if (optKey.isEmpty()) {
-        log.error("❌ No valid NIFTY FUT contract to subscribe.");
-        return;
-    }
-    String instrumentKey = optKey.get();
-    log.info("📦 Subscribing to NIFTY FUT: {}", instrumentKey);
-    futLtpInitialized.set(false);
-    long start = System.currentTimeMillis();
-    AtomicBoolean warned = new AtomicBoolean(false);
-
-    fetchWebSocketUrl()
-            .flatMapMany(wsUrl -> openWebSocketForOptions(wsUrl, buildSubFrame(instrumentKey)))
-            .doOnSubscribe(s -> futSubscribed.set(true))
-            .doFinally(sig -> futSubscribed.set(false))
-            .doOnNext(tick -> {
-                try {
-                    JsonNode feed = tick.path("feeds").path(instrumentKey);
-                    JsonNode ltpNode = feed
-                            .path("fullFeed")
-                            .path("marketFF")
-                            .path("ltpc")
-                            .path("ltp");
-
-                    if (ltpNode.isNumber()) {
-                        double ltp = ltpNode.asDouble();
-                        long ts = extractTimestamp(feed, tick);
-                        ltpSink.tryEmitNext(new LtpEvent(instrumentKey, ltp, Instant.ofEpochMilli(ts)));
-                        logLtp(instrumentKey, ltp, ts);
-                        writeTickToInflux(instrumentKey, feed, ts);
-                        lastTick.put(instrumentKey, new Tick(instrumentKey, ltp, Instant.ofEpochMilli(ts)));
-                        bufferOptionTick(instrumentKey, feed, ts, ltp);
-
-                        if (futLtpInitialized.compareAndSet(false, true)) {
-                            selectionComputed.set(true);
-                            nseInstrumentService.filterStrikesAroundLtpFromJson(ltp);
-                            NseInstrumentService.SelectionData sel = nseInstrumentService.currentSelectionData();
-                            String sig = nseInstrumentService.selectionSignature(sel);
-                            if (sig.equals(lastSelectionSignature.get())) {
-                                log.info("Orchestration skipped — selection unchanged (expiry={})", nseInstrumentService.formatExpiry(sel.expiry()));
-                            } else {
-                                lastSelectionSignature.set(sig);
-                                streamFilteredNiftyOptions();
-                                log.info("Setup complete — FUT={} expiry={}; CE={}, PE={}; subscribed={}",
-                                        instrumentKey,
-                                        nseInstrumentService.formatExpiry(sel.expiry()),
-                                        sel.ceCount(), sel.peCount(), sel.keys().size());
+                            var result = quantAnalysisService.analyze(instrumentKey, feed);
+                            if (result.signal() != QuantAnalysisService.Signal.NONE) {
+                                log.info("🎯 {} for {} → momentum={} volSpike={} imbalance={} noise={}",
+                                        result.signal(), instrumentKey,
+                                        String.format("%.4f", result.momentum()),
+                                        String.format("%.2f", result.volumeSpike()),
+                                        String.format("%.4f", result.imbalance()),
+                                        String.format("%.2f", result.noise()));
                             }
                         }
-                    } else if (!futLtpInitialized.get()) {
-                        long elapsed = System.currentTimeMillis() - start;
-                        if (elapsed > 500 && warned.compareAndSet(false, true)) {
-                            log.warn("⚠️ LTP not found in tick — instrumentKey={}", instrumentKey);
-                        } else {
-                            log.debug("Waiting for FUT LTP...");
+                    });
+                })
+                .doOnError(err -> {
+                    optionsStreamStarted.set(false);
+                    log.error("❌ filtered option feed failed:", err);
+                })
+                .doFinally(sig -> {
+                    optionsStreamStarted.set(false);
+                    log.info("🧹 filtered CE/PE stream terminated: {}", sig);
+                })
+                .subscribe();
+    }
+
+    public void streamSingleInstrument(String instrumentKey) {
+        log.info("🚀 Starting live stream for instrument → {}", instrumentKey);
+
+        ObjectNode frame = om.createObjectNode();
+        frame.put("guid", "single-instrument-guid");
+        frame.put("method", "sub");
+
+        ObjectNode data = frame.putObject("data");
+        data.put("mode", "full");
+        data.putArray("instrumentKeys").add(instrumentKey);
+
+        byte[] subFrame = frame.toString().getBytes(StandardCharsets.UTF_8);
+
+        fetchWebSocketUrl()
+                .flatMapMany(wsUrl -> openWebSocketForOptions(wsUrl, subFrame))
+                .doOnNext(tick -> {
+                    try {
+                        JsonNode ltpNode = tick.path("feeds")
+                                .path(instrumentKey)
+                                .path("fullFeed")
+                                .path("marketFF")
+                                .path("ltpc")
+                                .path("ltp");
+                        if (!ltpNode.isMissingNode()) {
+                            double ltp = ltpNode.asDouble();
+                            long ts = extractTimestamp(tick.path("feeds").path(instrumentKey), tick);
+                            logLtp(instrumentKey, ltp, ts);
+                            ltpSink.tryEmitNext(new LtpEvent(instrumentKey, ltp, Instant.ofEpochMilli(ts)));
+                            writeTickToInflux(instrumentKey, tick.path("feeds").path(instrumentKey), ts);
+                            lastTick.put(instrumentKey, new Tick(instrumentKey, ltp, Instant.ofEpochMilli(ts)));
+                            bufferOptionTick(instrumentKey, tick.path("feeds").path(instrumentKey), ts, ltp);
                         }
+                        sink.tryEmitNext(tick);
+                    } catch (Exception e) {
+                        log.error("❌ Error parsing tick JSON or filtering: ", e);
                     }
-                } catch (Exception ex) {
-                    log.error("⚠️ Failed to extract LTP or trigger filtering", ex);
-                }
-            })
-            .doOnError(err -> log.error("❌ WebSocket stream failed:", err))
-            .subscribe();
-}
-/** Builds a fresh SUB frame from the current filtered_nifty_premiums (15 CE + 15 PE). */
-/**
- * Opens a WS and sends a fresh SUB frame per connection (frameSupplier is called on every connect).
- * Use this for dynamic lists that may change between reconnects.
- */
-private Flux<JsonNode> openWebSocketWithDynamicSub(java.util.function.Supplier<byte[]> frameSupplier, int subsCount) {
-    ReactorNettyWebSocketClient client = createWsClient();
-    Sinks.Many<JsonNode> local = Sinks.many().multicast().onBackpressureBuffer();
-    AtomicInteger attempt = new AtomicInteger(0);
-    AtomicBoolean handshakeRetried = new AtomicBoolean(false);
-    AtomicBoolean skipDelay = new AtomicBoolean(false);
+                })
+                .doOnError(err -> log.error("❌ WebSocket stream failed:", err))
+                .subscribe();
+    }
 
-    Runnable connect = new Runnable() {
-        @Override
-        public void run() {
-            if (wsConnecting.getAndSet(true) || connected.get()) {
-                return;
-            }
-            auth.ensureValidToken().flatMap(valid -> {
-                if (!valid) {
-                    wsConnecting.set(false);
-                    int delay = nextDelay(attempt.incrementAndGet());
-                    log.info("LIVE DISCONNECTED → reconnect in {}s", delay);
-                    Mono.delay(Duration.ofSeconds(delay)).subscribe(i -> run());
-                    return Mono.empty();
-                }
-                return fetchWebSocketUrl().flatMap(wsUrl -> {
-                    HttpHeaders headers = new HttpHeaders();
-                    headers.setBearerAuth(auth.currentToken());
-                    return client.execute(URI.create(wsUrl), headers, session -> {
-                            Flux<WebSocketMessage> subscribeFrames;
-                            String futKey = futInstrumentKey.get();
-                            if (futKey != null) {
-                                subscribeFrames = Flux.concat(
-                                        Mono.just(session.binaryMessage(bb -> bb.wrap(buildSubFrame(futKey)))),
-                                        Mono.just(session.binaryMessage(bb -> bb.wrap(frameSupplier.get()))));
-                            } else {
-                                subscribeFrames = Flux.just(session.binaryMessage(bb -> bb.wrap(frameSupplier.get())));
-                            }
+    public byte[] buildSubFrame(String instrumentKey) {
+        ObjectNode frame = om.createObjectNode();
+        frame.put("guid", "nifty-fut-guid");
+        frame.put("method", "sub");
 
-                            Flux<WebSocketMessage> outbound = Flux.merge(subscribeFrames, keepAlive(session));
+        ObjectNode data = frame.putObject("data");
+        data.put("mode", "full");
+        data.putArray("instrumentKeys").add(instrumentKey);
 
-                            return session
-                                    .send(outbound)
-                                    .doOnSuccess(v -> {
-                                        futSubscribed.set(futKey != null);
-                                        int total = subsCount + (futSubscribed.get() ? 1 : 0);
-                                        if (connected.compareAndSet(false, true)) {
-                                            if (everConnected.getAndSet(true)) {
-                                                log.info("LIVE RECONNECTED");
-                                            }
-                                            log.info("LIVE CONNECTED (subs={})", total);
-                                        }
-                                        optSubscribedCount.set(subsCount);
-                                        attempt.set(0);
-                                        wsConnecting.set(false);
-                                    })
-                                    .and(session.receive()
-                                            .map(WebSocketMessage::getPayload)
-                                            .map(LiveFeedService.this::parseProtoFeedResponse)
-                                            .doOnNext(local::tryEmitNext)
-                                            .then());
-                        })
-                        .doOnError(err -> {
-                            if (err instanceof reactor.netty.http.client.WebSocketClientHandshakeException wse) {
-                                int code = wse.response().status().code();
-                                if (code == 401 && handshakeRetried.compareAndSet(false, true)) {
-                                    skipDelay.set(true);
-                                    log.warn("WS handshake 401 → refreshing token → retrying once");
-                                    auth.forceRefreshToken().subscribe(ok -> run());
-                                    return;
+        return frame.toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    private byte[] buildSubFrame(List<String> keys) {
+        ObjectNode frame = om.createObjectNode();
+        frame.put("guid", "filtered-options-guid");
+        frame.put("method", "sub");
+
+        ObjectNode data = frame.putObject("data");
+        data.put("mode", "full");
+        ArrayNode arr = data.putArray("instrumentKeys");
+        keys.forEach(arr::add);
+
+        return frame.toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    public MongoTemplate getMongoTemplate() { return mongoTemplate; }
+
+    public void streamNiftyFutAndTriggerCEPE() {
+        log.info("🚀 Subscribing to NIFTY FUT to extract LTP and filter CE/PE...");
+
+        if (auth.currentToken() == null) {
+            log.warn("⚠️ Cannot start NIFTY FUT stream — token not available");
+            return;
+        }
+
+        Optional<String> optKey = nseInstrumentService.nearestNiftyFutureKey();
+        if (optKey.isEmpty()) {
+            log.error("❌ No valid NIFTY FUT contract to subscribe.");
+            return;
+        }
+        String instrumentKey = optKey.get();
+        log.info("📦 Subscribing to NIFTY FUT: {}", instrumentKey);
+        futLtpInitialized.set(false);
+        long start = System.currentTimeMillis();
+        AtomicBoolean warned = new AtomicBoolean(false);
+
+        fetchWebSocketUrl()
+                .flatMapMany(wsUrl -> openWebSocketForOptions(wsUrl, buildSubFrame(instrumentKey)))
+                .doOnSubscribe(s -> futSubscribed.set(true))
+                .doFinally(sig -> futSubscribed.set(false))
+                .doOnNext(tick -> {
+                    try {
+                        JsonNode feed = tick.path("feeds").path(instrumentKey);
+                        JsonNode ltpNode = feed.path("fullFeed").path("marketFF").path("ltpc").path("ltp");
+
+                        if (ltpNode.isNumber()) {
+                            double ltp = ltpNode.asDouble();
+                            long ts = extractTimestamp(feed, tick);
+                            ltpSink.tryEmitNext(new LtpEvent(instrumentKey, ltp, Instant.ofEpochMilli(ts)));
+                            logLtp(instrumentKey, ltp, ts);
+                            writeTickToInflux(instrumentKey, feed, ts);
+                            lastTick.put(instrumentKey, new Tick(instrumentKey, ltp, Instant.ofEpochMilli(ts)));
+                            bufferOptionTick(instrumentKey, feed, ts, ltp);
+
+                            if (futLtpInitialized.compareAndSet(false, true)) {
+                                selectionComputed.set(true);
+                                nseInstrumentService.filterStrikesAroundLtpFromJson(ltp);
+                                NseInstrumentService.SelectionData sel = nseInstrumentService.currentSelectionData();
+                                String sig = nseInstrumentService.selectionSignature(sel);
+                                if (sig.equals(lastSelectionSignature.get())) {
+                                    log.info("Orchestration skipped — selection unchanged (expiry={})",
+                                            nseInstrumentService.formatExpiry(sel.expiry()));
+                                } else {
+                                    lastSelectionSignature.set(sig);
+                                    streamFilteredNiftyOptions();
+                                    log.info("Setup complete — FUT={} expiry={}; CE={}, PE={}; subscribed={}",
+                                            instrumentKey,
+                                            nseInstrumentService.formatExpiry(sel.expiry()),
+                                            sel.ceCount(), sel.peCount(), sel.keys().size());
                                 }
                             }
-                            log.error("❌ WebSocket stream failed:", err);
-                        })
-                        .doFinally(sig -> {
-                            connected.set(false);
-                            wsConnecting.set(false);
-                            futSubscribed.set(false);
-                            optSubscribedCount.set(0);
-                            if (skipDelay.getAndSet(false)) {
-                                return;
+                        } else if (!futLtpInitialized.get()) {
+                            long elapsed = System.currentTimeMillis() - start;
+                            if (elapsed > 500 && warned.compareAndSet(false, true)) {
+                                log.warn("⚠️ LTP not found in tick — instrumentKey={}", instrumentKey);
+                            } else {
+                                log.debug("Waiting for FUT LTP...");
                             }
-                            int delay = nextDelay(attempt.incrementAndGet());
-                            log.info("LIVE DISCONNECTED → reconnect in {}s", delay);
-                            Mono.delay(Duration.ofSeconds(delay)).subscribe(i -> run());
-                        });
-            }).onErrorResume(err -> {
-                wsConnecting.set(false);
-                connected.set(false);
-                int delay = nextDelay(attempt.incrementAndGet());
-                log.error("❌ WebSocket connect failed:", err);
-                log.info("LIVE DISCONNECTED → reconnect in {}s", delay);
-                Mono.delay(Duration.ofSeconds(delay)).subscribe(i -> run());
-                return Mono.empty();
-            }).subscribe();
-        }
-    };
+                        }
+                    } catch (Exception ex) {
+                        log.error("⚠️ Failed to extract LTP or trigger filtering", ex);
+                    }
+                })
+                .doOnError(err -> log.error("❌ WebSocket stream failed:", err))
+                .subscribe();
+    }
 
-    connect.run();
+    /**
+     * Opens a WS and sends a fresh SUB frame per connection (frameSupplier is called on every connect).
+     * Use this for dynamic lists that may change between reconnects.
+     */
+    private Flux<JsonNode> openWebSocketWithDynamicSub(java.util.function.Supplier<byte[]> frameSupplier, int subsCount) {
+        ReactorNettyWebSocketClient client = createWsClient();
+        Sinks.Many<JsonNode> local = Sinks.many().multicast().onBackpressureBuffer();
+        AtomicInteger attempt = new AtomicInteger(0);
+        AtomicBoolean handshakeRetried = new AtomicBoolean(false);
+        AtomicBoolean skipDelay = new AtomicBoolean(false);
 
-    return local.asFlux();
-}
+        Runnable connect = new Runnable() {
+            @Override
+            public void run() {
+                if (wsConnecting.getAndSet(true) || connected.get()) {
+                    return;
+                }
+                auth.ensureValidToken()
+                        .flatMap(valid -> {
+                            if (!valid) {
+                                wsConnecting.set(false);
+                                int delay = nextDelay(attempt.incrementAndGet());
+                                log.info("LIVE DISCONNECTED → reconnect in {}s", delay);
+                                Mono.delay(Duration.ofSeconds(delay)).subscribe(i -> run());
+                                return Mono.empty();
+                            }
+                            return fetchWebSocketUrl().flatMap(wsUrl -> {
+                                        HttpHeaders headers = new HttpHeaders();
+                                        headers.setBearerAuth(auth.currentToken());
+                                        return client.execute(URI.create(wsUrl), headers, session -> {
+                                                    Flux<WebSocketMessage> subscribeFrames;
+                                                    String futKey = futInstrumentKey.get();
+                                                    if (futKey != null) {
+                                                        subscribeFrames = Flux.concat(
+                                                                Mono.just(session.binaryMessage(bb -> bb.wrap(buildSubFrame(futKey)))),
+                                                                Mono.just(session.binaryMessage(bb -> bb.wrap(frameSupplier.get())))
+                                                        );
+                                                    } else {
+                                                        subscribeFrames = Flux.just(session.binaryMessage(bb -> bb.wrap(frameSupplier.get())));
+                                                    }
+
+                                                    Flux<WebSocketMessage> outbound = Flux.merge(subscribeFrames, keepAlive(session));
+
+                                                    return session
+                                                            .send(outbound)
+                                                            .doOnSuccess(v -> {
+                                                                futSubscribed.set(futKey != null);
+                                                                int total = subsCount + (futSubscribed.get() ? 1 : 0);
+                                                                if (connected.compareAndSet(false, true)) {
+                                                                    if (everConnected.getAndSet(true)) {
+                                                                        log.info("LIVE RECONNECTED");
+                                                                    }
+                                                                    log.info("LIVE CONNECTED (subs={})", total);
+                                                                }
+                                                                optSubscribedCount.set(subsCount);
+                                                                attempt.set(0);
+                                                                wsConnecting.set(false);
+                                                            })
+                                                            .and(session.receive()
+                                                                    .map(WebSocketMessage::getPayload)
+                                                                    .map(LiveFeedService.this::parseProtoFeedResponse)
+                                                                    .doOnNext(local::tryEmitNext)
+                                                                    .then());
+                                                })
+                                                .doOnError(err -> {
+                                                    if (err instanceof WebSocketClientHandshakeException wse) {
+                                                        int code = wse.response().status().code();
+                                                        if (code == 401 && handshakeRetried.compareAndSet(false, true)) {
+                                                            skipDelay.set(true);
+                                                            log.warn("WS handshake 401 → refreshing token → retrying once");
+                                                            auth.forceRefreshToken().subscribe(ok -> run());
+                                                            return;
+                                                        }
+                                                    }
+                                                    log.error("❌ WebSocket stream failed:", err);
+                                                })
+                                                .doFinally(sig -> {
+                                                    connected.set(false);
+                                                    wsConnecting.set(false);
+                                                    futSubscribed.set(false);
+                                                    optSubscribedCount.set(0);
+                                                    if (skipDelay.getAndSet(false)) {
+                                                        return;
+                                                    }
+                                                    int delay = nextDelay(attempt.incrementAndGet());
+                                                    log.info("LIVE DISCONNECTED → reconnect in {}s", delay);
+                                                    Mono.delay(Duration.ofSeconds(delay)).subscribe(i -> run());
+                                                });
+                                    })
+                                    .onErrorResume(err -> {
+                                        wsConnecting.set(false);
+                                        connected.set(false);
+                                        int delay = nextDelay(attempt.incrementAndGet());
+                                        log.error("❌ WebSocket connect failed:", err);
+                                        log.info("LIVE DISCONNECTED → reconnect in {}s", delay);
+                                        Mono.delay(Duration.ofSeconds(delay)).subscribe(i -> run());
+                                        return Mono.empty();
+                                    })
+                                    .then(); // end flatMap chain
+                        })
+                        .subscribe();
+            }
+        };
+
+        connect.run();
+        return local.asFlux();
+    }
 
     private void logLtp(String instrumentKey, double ltp, long ts) {
         logResolvedLtp(instrumentKey, ltp, "live");
@@ -1049,9 +992,6 @@ private Flux<JsonNode> openWebSocketWithDynamicSub(java.util.function.Supplier<b
 
         p.time(Instant.ofEpochMilli(ts), WritePrecision.MS);
 
-        if (writeApi == null) {
-            return;
-        }
         try {
             writeApi.writePoint(influxBucket, influxOrg, p);
             if (isFut) futWrites.incrementAndGet(); else optWrites.incrementAndGet();
@@ -1121,6 +1061,4 @@ private Flux<JsonNode> openWebSocketWithDynamicSub(java.util.function.Supplier<b
         }
         return System.currentTimeMillis();
     }
-
-
 }

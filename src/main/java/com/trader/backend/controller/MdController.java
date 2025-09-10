@@ -159,15 +159,20 @@ public class MdController {
     public ResponseEntity<Map<String, Object>> ltp(@RequestParam("instrumentKey") String instrumentKey) {
         LtpService.Result res = ltpService.resolve(instrumentKey);
         Double val = res.ltp();
-        log.info("LTP {} via {} value={} ts={}", instrumentKey, res.source(), val, res.ts());
+        boolean degraded = val == null || res.ts() == null;
+        if (degraded) {
+            log.info("GET /md/ltp instrumentKey={} src={} degraded=true", instrumentKey, res.source());
+            log.debug("GET /md/ltp instrumentKey={} src={} value={} ts={}", instrumentKey, res.source(), val, res.ts());
+        } else {
+            log.info("GET /md/ltp instrumentKey={} src={} value={} ts={} degraded=false", instrumentKey, res.source(), val, res.ts());
+        }
 
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("instrumentKey", instrumentKey);
         body.put("source", res.source());
-        if (val != null) {
+        body.put("degraded", degraded);
+        if (!degraded) {
             body.put("ltp", val);
-        }
-        if (res.ts() != null) {
             body.put("ts", res.ts().toString());
         }
         return ResponseEntity.ok()

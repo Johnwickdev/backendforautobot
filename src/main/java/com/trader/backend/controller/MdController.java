@@ -168,13 +168,17 @@ public class MdController {
         }
 
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("instrumentKey", instrumentKey);
+        List<Map<String, Object>> items = new ArrayList<>();
+        if (!degraded) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("instrumentKey", instrumentKey);
+            item.put("ltp", val);
+            item.put("ts", res.ts().toString());
+            items.add(item);
+        }
+        body.put("items", items);
         body.put("source", res.source());
         body.put("degraded", degraded);
-        if (!degraded) {
-            body.put("ltp", val);
-            body.put("ts", res.ts().toString());
-        }
         return ResponseEntity.ok()
                 .header("X-Source", res.source())
                 .body(body);

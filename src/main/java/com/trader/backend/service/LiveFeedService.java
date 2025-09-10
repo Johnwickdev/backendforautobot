@@ -85,6 +85,11 @@ private final AtomicBoolean optionsStreamStarted = new AtomicBoolean(false);
     private final AtomicLong ticksLast60s = new AtomicLong();
     private final AtomicReference<Instant> lastTickTs = new AtomicReference<>(null);
 
+    // guard against parallel WS connects
+    private final AtomicBoolean wsConnecting = new AtomicBoolean(false);
+    // remember current FUT instrument for resubscription
+    private final AtomicReference<String> futInstrumentKey = new AtomicReference<>(null);
+
 private final AtomicLong lastAutoStartLog = new AtomicLong(0);
 
     private final AtomicBoolean marketWasOpen = new AtomicBoolean(false);
@@ -339,7 +344,7 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
         Sinks.Many<JsonNode> local = Sinks.many().multicast().onBackpressureBuffer();
 
         client.execute(URI.create(wsUrl), session -> {
-            Flux<WebSocketMessage> pings = Flux.interval(Duration.ofSeconds(30))
+            Flux<WebSocketMessage> pings = Flux.interval(Duration.ofSeconds(25))
                     .map(i -> session.pingMessage(factory -> factory.wrap(new byte[0])));
             session.send(pings).subscribe();
 
@@ -502,7 +507,7 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
         Sinks.Many<JsonNode> local = Sinks.many().multicast().onBackpressureBuffer();
 
         client.execute(URI.create(wsUrl), session -> {
-            Flux<WebSocketMessage> pings = Flux.interval(Duration.ofSeconds(30))
+            Flux<WebSocketMessage> pings = Flux.interval(Duration.ofSeconds(25))
                     .map(i -> session.pingMessage(factory -> factory.wrap(new byte[0])));
             session.send(pings).subscribe();
 
@@ -577,6 +582,13 @@ public void streamFilteredNiftyOptions() {
     peLoadedCount.set(sel.peCount());
     currentExpiryMs.set(sel.expiry());
     List<String> desired = sel.keys();
+    String futKey = nseInstrumentService.nearestNiftyFutureKey().orElse(null);
+    if (futKey != null) {
+        futInstrumentKey.set(futKey);
+    }
+    List<String> optionKeys = desired.stream()
+            .filter(k -> !k.equals(futKey))
+            .toList();
     if (desired.isEmpty()) {
         log.info("OPTION-STREAM wait: no instruments yet (will retry)");
         optionsStreamStarted.set(false);
@@ -613,7 +625,7 @@ public void streamFilteredNiftyOptions() {
             }
             return fetchWebSocketUrl();
         })
-        .flatMapMany(wsUrl -> openWebSocketWithDynamicSub(wsUrl, () -> buildSubFrame(desired), desired.size()))
+        .flatMapMany(wsUrl -> openWebSocketWithDynamicSub(wsUrl, () -> buildSubFrame(optionKeys), optionKeys.size()))
         .retryWhen(Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(5)))
         .doOnSubscribe(s -> log.info("📡 Subscribed to filtered CE/PE (auto-resub on reconnect)"))
         .doOnNext(tick -> {
@@ -816,13 +828,27 @@ private Flux<JsonNode> openWebSocketWithDynamicSub(String wsUrl, java.util.funct
     Runnable connect = new Runnable() {
         @Override
         public void run() {
+            if (wsConnecting.getAndSet(true) || connected.get()) {
+                return; // guard against parallel connects
+            }
             client.execute(URI.create(wsUrl), session -> {
-                Flux<WebSocketMessage> pings = Flux.interval(Duration.ofSeconds(30))
+                Flux<WebSocketMessage> pings = Flux.interval(Duration.ofSeconds(25))
                         .map(i -> session.pingMessage(factory -> factory.wrap(new byte[0])));
                 session.send(pings).subscribe();
 
-                return session.send(Mono.just(session.binaryMessage(bb -> bb.wrap(frameSupplier.get()))))
+                Flux<WebSocketMessage> subs;
+                String futKey = futInstrumentKey.get();
+                if (futKey != null) {
+                    subs = Flux.concat(
+                            Mono.just(session.binaryMessage(bb -> bb.wrap(buildSubFrame(futKey)))),
+                            Mono.just(session.binaryMessage(bb -> bb.wrap(frameSupplier.get()))));
+                } else {
+                    subs = Flux.just(session.binaryMessage(bb -> bb.wrap(frameSupplier.get())));
+                }
+
+                return session.send(subs)
                         .doOnSuccess(v -> {
+                            futSubscribed.set(futKey != null);
                             int total = subsCount + (futSubscribed.get() ? 1 : 0);
                             if (connected.compareAndSet(false, true)) {
                                 if (everConnected.getAndSet(true)) {
@@ -832,6 +858,7 @@ private Flux<JsonNode> openWebSocketWithDynamicSub(String wsUrl, java.util.funct
                             }
                             optSubscribedCount.set(subsCount);
                             attempt.set(0);
+                            wsConnecting.set(false);
                         })
                         .thenMany(session.receive()
                                 .map(WebSocketMessage::getPayload)
@@ -840,6 +867,8 @@ private Flux<JsonNode> openWebSocketWithDynamicSub(String wsUrl, java.util.funct
                         .doOnError(err -> log.error("❌ WebSocket stream failed:", err))
                         .doFinally(sig -> {
                             connected.set(false);
+                            wsConnecting.set(false);
+                            futSubscribed.set(false);
                             optSubscribedCount.set(0);
                             int delay = nextDelay(attempt.incrementAndGet());
                             log.info("LIVE DISCONNECTED → reconnecting in {}s", delay);

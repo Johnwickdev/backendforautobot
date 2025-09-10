@@ -347,7 +347,7 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
         Sinks.Many<JsonNode> local = Sinks.many().multicast().onBackpressureBuffer();
 
         client.execute(URI.create(wsUrl), session -> {
-            Flux<WebSocketMessage> pings = Flux.interval(Duration.ofSeconds(25))
+            Flux<WebSocketMessage> pings = Flux.interval(Duration.ofSeconds(30))
                     .map(i -> session.pingMessage(factory -> factory.wrap(new byte[0])));
             session.send(pings).subscribe();
 
@@ -528,7 +528,7 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
                             .doOnError(err -> log.error("❌ WebSocket stream failed:", err))
                             .doFinally(sig -> {
                                 int delay = nextDelay(attempt.incrementAndGet());
-                                log.info("LIVE DISCONNECTED → reconnecting in {}s", delay);
+                                log.info("LIVE DISCONNECTED → reconnect in {}s", delay);
                                 Mono.delay(Duration.ofSeconds(delay)).subscribe(i -> run());
                             })
                             .then();
@@ -632,15 +632,14 @@ public void streamFilteredNiftyOptions() {
     log.info("OPTION-STREAM started keys={} expiry={}", desired.size(), sel.expiry());
 
     auth.ensureValidToken()
-        .flatMap(valid -> {
+        .flatMapMany(valid -> {
             if (!valid) {
                 optionsStreamStarted.set(false);
                 log.warn("⚠️ Upstox token not ready — skipping option stream start");
-                return Mono.empty();
+                return Flux.empty();
             }
-            return fetchWebSocketUrl();
+            return openWebSocketWithDynamicSub(() -> buildSubFrame(optionKeys), optionKeys.size());
         })
-        .flatMapMany(wsUrl -> openWebSocketWithDynamicSub(wsUrl, () -> buildSubFrame(optionKeys), optionKeys.size()))
         .retryWhen(Retry.backoff(Long.MAX_VALUE, Duration.ofSeconds(5)))
         .doOnSubscribe(s -> log.info("📡 Subscribed to filtered CE/PE (auto-resub on reconnect)"))
         .doOnNext(tick -> {
@@ -835,61 +834,97 @@ public void streamNiftyFutAndTriggerCEPE() {
  * Opens a WS and sends a fresh SUB frame per connection (frameSupplier is called on every connect).
  * Use this for dynamic lists that may change between reconnects.
  */
-private Flux<JsonNode> openWebSocketWithDynamicSub(String wsUrl, java.util.function.Supplier<byte[]> frameSupplier, int subsCount) {
+private Flux<JsonNode> openWebSocketWithDynamicSub(java.util.function.Supplier<byte[]> frameSupplier, int subsCount) {
     ReactorNettyWebSocketClient client = createWsClient();
     Sinks.Many<JsonNode> local = Sinks.many().multicast().onBackpressureBuffer();
     AtomicInteger attempt = new AtomicInteger(0);
+    AtomicBoolean handshakeRetried = new AtomicBoolean(false);
+    AtomicBoolean skipDelay = new AtomicBoolean(false);
 
     Runnable connect = new Runnable() {
         @Override
         public void run() {
             if (wsConnecting.getAndSet(true) || connected.get()) {
-                return; // guard against parallel connects
+                return;
             }
-            client.execute(URI.create(wsUrl), session -> {
-                Flux<WebSocketMessage> pings = Flux.interval(Duration.ofSeconds(25))
-                        .map(i -> session.pingMessage(factory -> factory.wrap(new byte[0])));
-                session.send(pings).subscribe();
-
-                Flux<WebSocketMessage> subs;
-                String futKey = futInstrumentKey.get();
-                if (futKey != null) {
-                    subs = Flux.concat(
-                            Mono.just(session.binaryMessage(bb -> bb.wrap(buildSubFrame(futKey)))),
-                            Mono.just(session.binaryMessage(bb -> bb.wrap(frameSupplier.get()))));
-                } else {
-                    subs = Flux.just(session.binaryMessage(bb -> bb.wrap(frameSupplier.get())));
+            auth.ensureValidToken().flatMap(valid -> {
+                if (!valid) {
+                    wsConnecting.set(false);
+                    int delay = nextDelay(attempt.incrementAndGet());
+                    log.info("LIVE DISCONNECTED → reconnect in {}s", delay);
+                    Mono.delay(Duration.ofSeconds(delay)).subscribe(i -> run());
+                    return Mono.empty();
                 }
+                return fetchWebSocketUrl().flatMap(wsUrl -> {
+                    HttpHeaders headers = new HttpHeaders();
+                    headers.setBearerAuth(auth.currentToken());
+                    return client.execute(URI.create(wsUrl), headers, session -> {
+                            Flux<WebSocketMessage> pings = Flux.interval(Duration.ofSeconds(30))
+                                    .map(i -> session.pingMessage(factory -> factory.wrap(new byte[0])));
+                            session.send(pings).subscribe();
 
-                return session.send(subs)
-                        .doOnSuccess(v -> {
-                            futSubscribed.set(futKey != null);
-                            int total = subsCount + (futSubscribed.get() ? 1 : 0);
-                            if (connected.compareAndSet(false, true)) {
-                                if (everConnected.getAndSet(true)) {
-                                    log.info("LIVE RECONNECTED");
-                                }
-                                log.info("LIVE CONNECTED (subs={})", total);
+                            Flux<WebSocketMessage> subs;
+                            String futKey = futInstrumentKey.get();
+                            if (futKey != null) {
+                                subs = Flux.concat(
+                                        Mono.just(session.binaryMessage(bb -> bb.wrap(buildSubFrame(futKey)))),
+                                        Mono.just(session.binaryMessage(bb -> bb.wrap(frameSupplier.get()))));
+                            } else {
+                                subs = Flux.just(session.binaryMessage(bb -> bb.wrap(frameSupplier.get())));
                             }
-                            optSubscribedCount.set(subsCount);
-                            attempt.set(0);
-                            wsConnecting.set(false);
+
+                            return session.send(subs)
+                                    .doOnSuccess(v -> {
+                                        futSubscribed.set(futKey != null);
+                                        int total = subsCount + (futSubscribed.get() ? 1 : 0);
+                                        if (connected.compareAndSet(false, true)) {
+                                            if (everConnected.getAndSet(true)) {
+                                                log.info("LIVE RECONNECTED");
+                                            }
+                                            log.info("LIVE CONNECTED (subs={})", total);
+                                        }
+                                        optSubscribedCount.set(subsCount);
+                                        attempt.set(0);
+                                        wsConnecting.set(false);
+                                    })
+                                    .thenMany(session.receive()
+                                            .map(WebSocketMessage::getPayload)
+                                            .map(LiveFeedService.this::parseProtoFeedResponse)
+                                            .doOnNext(local::tryEmitNext))
+                                    .then();
                         })
-                        .thenMany(session.receive()
-                                .map(WebSocketMessage::getPayload)
-                                .map(LiveFeedService.this::parseProtoFeedResponse)
-                                .doOnNext(local::tryEmitNext))
-                        .doOnError(err -> log.error("❌ WebSocket stream failed:", err))
+                        .doOnError(err -> {
+                            if (err instanceof reactor.netty.http.client.WebSocketClientHandshakeException wse) {
+                                int code = wse.response().status().code();
+                                if (code == 401 && handshakeRetried.compareAndSet(false, true)) {
+                                    skipDelay.set(true);
+                                    log.warn("WS handshake 401 → refreshing token → retrying once");
+                                    auth.forceRefreshToken().subscribe(ok -> run());
+                                    return;
+                                }
+                            }
+                            log.error("❌ WebSocket stream failed:", err);
+                        })
                         .doFinally(sig -> {
                             connected.set(false);
                             wsConnecting.set(false);
                             futSubscribed.set(false);
                             optSubscribedCount.set(0);
+                            if (skipDelay.getAndSet(false)) {
+                                return;
+                            }
                             int delay = nextDelay(attempt.incrementAndGet());
-                            log.info("LIVE DISCONNECTED → reconnecting in {}s", delay);
+                            log.info("LIVE DISCONNECTED → reconnect in {}s", delay);
                             Mono.delay(Duration.ofSeconds(delay)).subscribe(i -> run());
-                        })
-                        .then();
+                        });
+            }).onErrorResume(err -> {
+                wsConnecting.set(false);
+                connected.set(false);
+                int delay = nextDelay(attempt.incrementAndGet());
+                log.error("❌ WebSocket connect failed:", err);
+                log.info("LIVE DISCONNECTED → reconnect in {}s", delay);
+                Mono.delay(Duration.ofSeconds(delay)).subscribe(i -> run());
+                return Mono.empty();
             }).subscribe();
         }
     };
@@ -1000,6 +1035,9 @@ private Flux<JsonNode> openWebSocketWithDynamicSub(String wsUrl, java.util.funct
 
         p.time(Instant.ofEpochMilli(ts), WritePrecision.MS);
 
+        if (writeApi == null) {
+            return;
+        }
         try {
             writeApi.writePoint(influxBucket, influxOrg, p);
             if (isFut) futWrites.incrementAndGet(); else optWrites.incrementAndGet();

@@ -145,8 +145,9 @@ public class UpstoxAuthService {
         }
 
         long exp = expiresAt.get();
-        if (now >= exp) {
-            log.warn("Access token expired; attempting refresh");
+        long remaining = exp - now;
+        if (exp == 0 || remaining <= 60) {
+            log.warn("Access token expiring soon; attempting refresh");
             return refreshToken()
                     .onErrorResume(e -> {
                         log.warn("Token refresh failed", e);
@@ -201,6 +202,11 @@ public class UpstoxAuthService {
                     authEvents.tryEmitNext(AuthEvent.EXPIRED);
                     return Mono.just(false);
                 });
+    }
+
+    /** Force a refresh regardless of expiry. */
+    public Mono<Boolean> forceRefreshToken() {
+        return refreshToken();
     }
 
     /**

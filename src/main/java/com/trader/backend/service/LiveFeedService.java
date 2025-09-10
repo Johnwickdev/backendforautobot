@@ -155,6 +155,9 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
     }
     @PostConstruct
     public void subscribeToAuthEvents() {
+        if (writeApi == null) {
+            log.debug("FUT write path disabled (counters suppressed)");
+        }
         auth.events()
                 .filter(e -> e == UpstoxAuthService.AuthEvent.READY)
                 .subscribe(ev -> {
@@ -505,23 +508,35 @@ private final Set<String> currentlySubscribedKeys = ConcurrentHashMap.newKeySet(
     public Flux<JsonNode> openWebSocketForOptions(String wsUrl, byte[] subFrame) {
         ReactorNettyWebSocketClient client = createWsClient();
         Sinks.Many<JsonNode> local = Sinks.many().multicast().onBackpressureBuffer();
+        AtomicInteger attempt = new AtomicInteger(0);
 
-        client.execute(URI.create(wsUrl), session -> {
-            Flux<WebSocketMessage> pings = Flux.interval(Duration.ofSeconds(25))
-                    .map(i -> session.pingMessage(factory -> factory.wrap(new byte[0])));
-            session.send(pings).subscribe();
+        Runnable connect = new Runnable() {
+            @Override
+            public void run() {
+                client.execute(URI.create(wsUrl), session -> {
+                    Flux<WebSocketMessage> pings = Flux.interval(Duration.ofSeconds(30))
+                            .map(i -> session.pingMessage(factory -> factory.wrap(new byte[0])));
+                    session.send(pings).subscribe();
 
-            return session.send(Mono.just(session.binaryMessage(bb -> bb.wrap(subFrame))))
-                    .doOnSuccess(v -> log.info("▶︎ Nifty options subscription frame sent"))
-                    .thenMany(session.receive()
-                            .map(WebSocketMessage::getPayload)
-                            .map(this::parseProtoFeedResponse)
-                            .doOnNext(local::tryEmitNext)
-                            .doOnSubscribe(s -> log.info("📡 Subscribed to Nifty options WebSocket feed"))
+                    return session.send(Mono.just(session.binaryMessage(bb -> bb.wrap(subFrame))))
+                            .doOnSuccess(v -> log.info("▶︎ Nifty options subscription frame sent"))
+                            .thenMany(session.receive()
+                                    .map(WebSocketMessage::getPayload)
+                                    .map(LiveFeedService.this::parseProtoFeedResponse)
+                                    .doOnNext(local::tryEmitNext)
+                                    .doOnSubscribe(s -> log.info("📡 Subscribed to Nifty options WebSocket feed")))
+                            .doOnError(err -> log.error("❌ WebSocket stream failed:", err))
+                            .doFinally(sig -> {
+                                int delay = nextDelay(attempt.incrementAndGet());
+                                log.info("LIVE DISCONNECTED → reconnecting in {}s", delay);
+                                Mono.delay(Duration.ofSeconds(delay)).subscribe(i -> run());
+                            })
+                            .then();
+                }).subscribe();
+            }
+        };
 
-                    )
-                    .then();
-        }).subscribe();
+        connect.run();
 
         return local.asFlux();
     }

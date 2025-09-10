@@ -835,22 +835,21 @@ public Mono<Double> getNearestExpiryNiftyFutureLtp() {
             });
 }
 
-private void refreshNiftyFuturesIfNeeded() {
+private synchronized void refreshNiftyFuturesIfNeeded() {
     long now = System.currentTimeMillis();
     Query q = new Query(Criteria.where("segment").is("NSE_FO")
             .and("instrumentType").is("FUT")
             .and("name").is("NIFTY")
             .and("expiry").gt(now));
-    long count = mongoTemplate.count(q, "nifty_futures");
-    if (count > 0) {
+    if (mongoTemplate.count(q, "nifty_futures") > 0) {
         return; // already have valid futures
     }
     if (now - lastFutRefreshMs < 60_000L) {
         return; // debounce reload attempts
     }
+    lastFutRefreshMs = now;
     log.warn("⚠️ No future NIFTY FUT contracts found. Reloading from JSON...");
     saveNiftyFuturesToMongo();
-    lastFutRefreshMs = now;
 }
 
 public Optional<String> nearestNiftyFutureKey() {

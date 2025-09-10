@@ -19,6 +19,7 @@ import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.socket.WebSocketMessage;
+import org.springframework.web.reactive.socket.WebSocketSession;
 import org.springframework.web.reactive.socket.client.ReactorNettyWebSocketClient;
 import reactor.core.Exceptions;
 import reactor.core.publisher.Flux;
@@ -885,7 +886,8 @@ private Flux<JsonNode> openWebSocketWithDynamicSub(java.util.function.Supplier<b
                                 subs = Flux.just(session.binaryMessage(bb -> bb.wrap(frameSupplier.get())));
                             }
 
-                            return session.send(Flux.merge(subs, keepAlive))
+                            return session
+                                    .send(Flux.merge(subs, keepAlive))
                                     .doOnSuccess(v -> {
                                         futSubscribed.set(futKey != null);
                                         int total = subsCount + (futSubscribed.get() ? 1 : 0);
@@ -899,11 +901,11 @@ private Flux<JsonNode> openWebSocketWithDynamicSub(java.util.function.Supplier<b
                                         attempt.set(0);
                                         wsConnecting.set(false);
                                     })
-                                    .thenMany(session.receive()
+                                    .and(session.receive()
                                             .map(WebSocketMessage::getPayload)
                                             .map(LiveFeedService.this::parseProtoFeedResponse)
-                                            .doOnNext(local::tryEmitNext))
-                                    .then();
+                                            .doOnNext(local::tryEmitNext)
+                                            .then());
                         })
                         .doOnError(err -> {
                             if (err instanceof reactor.netty.http.client.WebSocketClientHandshakeException wse) {

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 import org.springframework.data.annotation.Id;
+import org.springframework.data.mongodb.core.index.Indexed;
 import org.springframework.data.mongodb.core.mapping.Document;
 import org.springframework.data.mongodb.core.mapping.Field;
 
@@ -34,10 +35,12 @@ public class NseInstrument {
 
     @JsonProperty("expiry")
     @Field("expiry")
+    @Indexed
     private long expiry;
 
     @JsonProperty("instrument_type")
     @Field("instrument_type")
+    @Indexed
     private String instrumentType;
 
     @JsonProperty("strike_price")
@@ -74,6 +77,7 @@ public class NseInstrument {
 
     @JsonProperty("underlying_key")
     @Field("underlying_key")
+    @Indexed
     private String underlyingKey;
 
     @JsonProperty("tick_size")
@@ -90,6 +94,7 @@ public class NseInstrument {
 
     @JsonProperty("trading_symbol")
     @Field("trading_symbol")
+    @Indexed
     private String tradingSymbol;
 
     @JsonProperty("qty_multiplier")

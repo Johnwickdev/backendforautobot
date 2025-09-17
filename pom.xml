@@ -29,7 +29,7 @@
                 <maven.failsafe.plugin.version>3.2.5</maven.failsafe.plugin.version>
 
                 <!-- align your Protobuf versions here -->
-                <protoc.version>3.21.12</protoc.version>
+                <protoc.version>3.25.3</protoc.version>
                 <!-- Skip frontend build by default to avoid requiring Node during CI -->
                 <skipFrontend>true</skipFrontend>
         </properties>
@@ -95,12 +95,12 @@
                 <dependency>
                         <groupId>com.google.protobuf</groupId>
                         <artifactId>protobuf-java</artifactId>
-                        <version>3.21.12</version>
+                        <version>3.25.3</version>
                 </dependency>
                 <dependency>
                         <groupId>com.google.protobuf</groupId>
                         <artifactId>protobuf-java-util</artifactId>
-                        <version>3.21.12</version>
+                        <version>3.25.3</version>
                 </dependency>
 
                 <!-- Enforce okhttp3/okio line -->
@@ -183,10 +183,10 @@
                                                         <rules>
                                                                 <bannedDependencies>
                                                                         <excludes>
-                                                                                <exclude>com.google.protobuf:protobuf-java:(,3.21.12)</exclude>
-                                                                                <exclude>com.google.protobuf:protobuf-java:(3.21.12,)</exclude>
-                                                                                <exclude>com.google.protobuf:protobuf-java-util:(,3.21.12)</exclude>
-                                                                                <exclude>com.google.protobuf:protobuf-java-util:(3.21.12,)</exclude>
+                                                                                <exclude>com.google.protobuf:protobuf-java:(,3.25.3)</exclude>
+                                                                                <exclude>com.google.protobuf:protobuf-java:(3.25.3,)</exclude>
+                                                                                <exclude>com.google.protobuf:protobuf-java-util:(,3.25.3)</exclude>
+                                                                                <exclude>com.google.protobuf:protobuf-java-util:(3.25.3,)</exclude>
                                                                         </excludes>
                                                                         <searchTransitive>true</searchTransitive>
                                                                 </bannedDependencies>

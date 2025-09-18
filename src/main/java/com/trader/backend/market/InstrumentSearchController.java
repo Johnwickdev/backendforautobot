@@ -1,6 +1,7 @@
 package com.trader.backend.market;
 
 import com.trader.backend.entity.NseInstrument;
+import com.trader.backend.service.NseInstrumentService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Sort;
@@ -23,6 +24,7 @@ import java.util.regex.Pattern;
 public class InstrumentSearchController {
 
     private static final int MAX_LIMIT = 100;
+    private static final String COLLECTION = NseInstrumentService.INSTRUMENT_SEARCH_COLLECTION;
 
     private final MongoTemplate mongoTemplate;
 
@@ -42,7 +44,7 @@ public class InstrumentSearchController {
         Query mongoQuery = Query.query(criteria)
                 .limit(sanitizedLimit)
                 .with(Sort.by(Sort.Direction.ASC, "trading_symbol"));
-        List<NseInstrument> results = mongoTemplate.find(mongoQuery, NseInstrument.class, "nse_instruments");
+        List<NseInstrument> results = mongoTemplate.find(mongoQuery, NseInstrument.class, COLLECTION);
         return results.stream()
                 .map(this::toDto)
                 .toList();

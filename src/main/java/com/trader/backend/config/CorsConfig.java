@@ -26,7 +26,7 @@ public class CorsConfig {
     config.setExposedHeaders(List.of("Location"));
 
     UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
-    List.of("/auth/**", "/md/**", "/ops/**", "/ws/**")
+    List.of("/auth/**", "/md/**", "/ops/**", "/api/**", "/ws/**")
         .forEach(path -> source.registerCorsConfiguration(path, config));
     return new CorsFilter(source);
   }

@@ -35,8 +35,12 @@ public class MarketHistoryController {
                                    @RequestParam(value = "interval", defaultValue = "1minute") String interval,
                                    @RequestParam(value = "from", required = false)
                                    @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
+                                   @RequestParam(value = "from_date", required = false)
+                                   @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate fromDate,
                                    @RequestParam(value = "to", required = false)
-                                   @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to) {
+                                   @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to,
+                                   @RequestParam(value = "to_date", required = false)
+                                   @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate toDate) {
         if (!StringUtils.hasText(instrumentKey)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "instrumentKey is required");
         }
@@ -51,26 +55,27 @@ public class MarketHistoryController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid interval: " + interval);
         }
 
-        int units = matcher.group(1) != null ? Integer.parseInt(matcher.group(1)) : 1;
-        if (units <= 0) {
+        int parsedInterval = matcher.group(1) != null ? Integer.parseInt(matcher.group(1)) : 1;
+        if (parsedInterval <= 0) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "interval must be positive");
         }
 
-        String unit = matcher.group(2).toLowerCase(Locale.ROOT);
-        String normalizedUnit = unit.equals("day") ? "day" : "minutes";
-        int normalizedInterval = unit.equals("day") ? units : units;
+        String parsedUnit = matcher.group(2).toLowerCase(Locale.ROOT);
+        if ("day".equals(parsedUnit) && parsedInterval != 1) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Daily interval must be 1day");
+        }
 
         LocalDate today = LocalDate.now(MARKET_ZONE);
-        LocalDate startDate = from != null ? from : today;
-        LocalDate endDate = to != null ? to : startDate;
+        LocalDate startDate = coalesceDate(from, fromDate, today);
+        LocalDate endDate = coalesceDate(to, toDate, startDate);
         if (endDate.isBefore(startDate)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "to must be on or after from");
         }
 
         List<Candle> candles = historicalDataService.getOrFetchHistory(
                 instrumentKey,
-                normalizedUnit,
-                normalizedInterval,
+                parsedUnit,
+                parsedInterval,
                 startDate,
                 endDate);
         return candles.stream()
@@ -85,5 +90,15 @@ public class MarketHistoryController {
     }
 
     public record CandleDto(long ts, double o, double h, double l, double c, long v) {
+    }
+
+    private LocalDate coalesceDate(LocalDate primary, LocalDate secondary, LocalDate fallback) {
+        if (primary != null) {
+            return primary;
+        }
+        if (secondary != null) {
+            return secondary;
+        }
+        return fallback;
     }
 }

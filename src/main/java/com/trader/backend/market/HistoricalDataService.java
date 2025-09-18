@@ -12,7 +12,6 @@ import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.util.UriComponentsBuilder;
 import reactor.core.publisher.Mono;
 
-import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -24,11 +23,11 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 
 @Service
 @RequiredArgsConstructor
@@ -39,7 +38,6 @@ public class HistoricalDataService {
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ISO_LOCAL_DATE;
     private static final DateTimeFormatter LEGACY_TS_FORMATTER =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(MARKET_ZONE);
-    private static final Set<String> SUPPORTED_UNITS = Set.of("minutes", "hour", "day");
     private static final Duration API_TIMEOUT = Duration.ofSeconds(15);
 
     private final WebClient.Builder webClientBuilder;
@@ -58,8 +56,13 @@ public class HistoricalDataService {
         Instant fromInstant = sanitizedFrom.atStartOfDay(MARKET_ZONE).toInstant();
         Instant toInstant = sanitizedTo.plusDays(1).atStartOfDay(MARKET_ZONE).minusNanos(1).toInstant();
 
-        List<Candle> existing = candleRepository
-                .findByInstrumentKeyAndUnitAndIntervalAndTsBetween(instrumentKey, normalizedUnit, interval, fromInstant, toInstant);
+        List<Candle> cached = new ArrayList<>(candleRepository
+                .findByInstrumentKeyAndUnitAndIntervalAndTsBetween(instrumentKey, normalizedUnit, interval, fromInstant, toInstant));
+        for (String alias : legacyAliases(normalizedUnit)) {
+            cached.addAll(candleRepository
+                    .findByInstrumentKeyAndUnitAndIntervalAndTsBetween(instrumentKey, alias, interval, fromInstant, toInstant));
+        }
+        List<Candle> existing = dedupe(cached);
 
         long expected = expectedCount(normalizedUnit, interval, sanitizedFrom, sanitizedTo);
         if (expected <= 0) {
@@ -101,11 +104,48 @@ public class HistoricalDataService {
     }
 
     private String normalizeUnit(String unit) {
-        String normalized = unit == null ? "minutes" : unit.toLowerCase(Locale.ROOT);
-        if (!SUPPORTED_UNITS.contains(normalized)) {
-            throw new IllegalArgumentException("Unsupported unit: " + unit);
+        String normalized = unit == null ? "minute" : unit.toLowerCase(Locale.ROOT);
+        return switch (normalized) {
+            case "minute", "minutes" -> "minute";
+            case "hour", "hours" -> "hour";
+            case "day", "days" -> "day";
+            case "week", "weeks" -> "week";
+            case "month", "months" -> "month";
+            default -> throw new IllegalArgumentException("Unsupported unit: " + unit);
+        };
+    }
+
+    private List<String> legacyAliases(String unit) {
+        return switch (unit) {
+            case "minute" -> List.of("minutes");
+            case "hour" -> List.of("hours");
+            case "day" -> List.of("days");
+            case "week" -> List.of("weeks");
+            case "month" -> List.of("months");
+            default -> List.of();
+        };
+    }
+
+    private List<Candle> dedupe(List<Candle> candles) {
+        Map<String, Candle> unique = new LinkedHashMap<>();
+        List<Candle> withoutId = new ArrayList<>();
+        for (Candle candle : candles) {
+            if (candle == null) {
+                continue;
+            }
+            String id = candle.getId();
+            if ((id == null || id.isBlank()) && candle.getTs() != null) {
+                id = candle.getInstrumentKey() + "/" + candle.getTs().toEpochMilli();
+            }
+            if (id == null || id.isBlank()) {
+                withoutId.add(candle);
+                continue;
+            }
+            unique.put(id, candle);
         }
-        return normalized;
+        List<Candle> result = new ArrayList<>(unique.values());
+        result.addAll(withoutId);
+        return result;
     }
 
     private boolean ensureToken() {
@@ -126,20 +166,19 @@ public class HistoricalDataService {
                                           LocalDate to,
                                           String accessToken) {
         try {
-            URI uri = UriComponentsBuilder
-                    .fromHttpUrl("https://api.upstox.com/v3/historical-candle")
-                    .pathSegment(instrumentKey)
-                    .pathSegment(unit)
-                    .pathSegment(String.valueOf(interval))
-                    .queryParam("from", DATE_FORMATTER.format(from))
-                    .queryParam("to", DATE_FORMATTER.format(to))
-                    .build()
+            String path = UriComponentsBuilder
+                    .fromPath("/historical-candle/{instrumentKey}/{unit}/{interval}")
+                    .queryParam("to_date", DATE_FORMATTER.format(to))
+                    .queryParam("from_date", DATE_FORMATTER.format(from))
+                    .buildAndExpand(instrumentKey, unit, interval)
                     .encode()
-                    .toUri();
+                    .toUriString();
 
-            WebClient client = webClientBuilder.clone().build();
+            WebClient client = webClientBuilder.clone()
+                    .baseUrl("https://api.upstox.com/v3")
+                    .build();
             JsonNode response = client.get()
-                    .uri(uri)
+                    .uri(path)
                     .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
                     .header(HttpHeaders.ACCEPT, MediaType.APPLICATION_JSON_VALUE)
                     .retrieve()
@@ -209,9 +248,11 @@ public class HistoricalDataService {
         }
         ChronoUnit chronoUnit;
         switch (unit) {
-            case "minutes" -> chronoUnit = ChronoUnit.MINUTES;
+            case "minute" -> chronoUnit = ChronoUnit.MINUTES;
             case "hour" -> chronoUnit = ChronoUnit.HOURS;
             case "day" -> chronoUnit = ChronoUnit.DAYS;
+            case "week" -> chronoUnit = ChronoUnit.WEEKS;
+            case "month" -> chronoUnit = ChronoUnit.MONTHS;
             default -> throw new IllegalArgumentException("Unsupported unit: " + unit);
         }
         long totalUnits = chronoUnit.between(from.atStartOfDay(MARKET_ZONE), to.plusDays(1).atStartOfDay(MARKET_ZONE));

@@ -230,6 +230,13 @@ public class UpstoxAuthService {
         return accessToken.get();
     }
 
+    /**
+     * Convenience accessor used by services that need the raw bearer token.
+     */
+    public String getAccessToken() {
+        return currentToken();
+    }
+
     public void setCurrentToken(String token) {
         accessToken.set(token);
         apiClient.addDefaultHeader("Authorization", "Bearer " + token);

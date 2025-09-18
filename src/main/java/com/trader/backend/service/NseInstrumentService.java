@@ -9,11 +9,15 @@ import java.time.Instant;
 import java.time.temporal.TemporalAdjusters;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import javax.annotation.PostConstruct;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.stereotype.Service;
@@ -46,6 +50,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.index.Index;
+import org.springframework.data.mongodb.core.index.IndexOperations;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.stereotype.Service;
@@ -56,11 +62,14 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.*;
+import java.util.Locale;
 import java.util.stream.Collectors;
 import org.springframework.context.annotation.Lazy;
 // imports to add at the top of NseInstrumentService
 import org.springframework.context.ApplicationEventPublisher;
 import com.trader.backend.events.FilteredPremiumsUpdatedEvent;
+import com.trader.backend.market.MarketDtos;
+import org.springframework.util.StringUtils;
 
 
 
@@ -79,6 +88,13 @@ public class NseInstrumentService {
     private final MongoTemplate mongoTemplate;
     private final NSEDownloaderService nseDownloaderService;
     private final ExpirySelectorService expirySelectorService;
+
+    @Value("${app.instruments.nse-json:}")
+    private String instrumentsPath;
+
+    public static final String INSTRUMENT_SEARCH_COLLECTION = "nse_instruments_search";
+    private static final TypeReference<List<NseInstrument>> NSE_LIST_TYPE = new TypeReference<>() {
+    };
 
     // Cache for NSE.json contents
     private List<NseInstrument> nseCache = Collections.emptyList();
@@ -127,6 +143,97 @@ public class NseInstrumentService {
     public List<NseInstrument> getCachedNse() {
         ensureNseJsonLoaded(false);
         return nseCache;
+    }
+
+    @PostConstruct
+    public void refreshInstrumentSearchOnStartup() {
+        try {
+            refreshInstrumentSearchUniverse();
+        } catch (Exception e) {
+            log.warn("Initial instrument search refresh failed", e);
+        }
+    }
+
+    @Scheduled(cron = "0 0 8 * * MON-FRI", zone = "Asia/Kolkata")
+    public void refreshInstrumentSearchDaily() {
+        try {
+            refreshInstrumentSearchUniverse();
+        } catch (Exception e) {
+            log.error("Scheduled instrument search refresh failed", e);
+        }
+    }
+
+    public synchronized MarketDtos.RefreshResult refreshInstrumentSearchUniverse() {
+        try {
+            List<NseInstrument> all = loadInstrumentUniverse();
+            int total = all.size();
+            List<NseInstrument> eligible = all.stream()
+                    .filter(this::isEligibleForSearch)
+                    .peek(this::normalizeInstrument)
+                    .filter(i -> StringUtils.hasText(i.getInstrumentKey()))
+                    .toList();
+
+            mongoTemplate.dropCollection(INSTRUMENT_SEARCH_COLLECTION);
+            if (!eligible.isEmpty()) {
+                mongoTemplate.insert(eligible, INSTRUMENT_SEARCH_COLLECTION);
+            }
+            ensureSearchIndexes();
+
+            int processed = eligible.size();
+            int skipped = total - processed;
+            log.info("OPTIONS-REFRESH triggered collection={} processed={} saved={} skipped={}",
+                    INSTRUMENT_SEARCH_COLLECTION, processed, processed, skipped);
+            return new MarketDtos.RefreshResult(processed, processed, skipped);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to refresh instrument search universe", e);
+        }
+    }
+
+    private void ensureSearchIndexes() {
+        IndexOperations indexOps = mongoTemplate.indexOps(INSTRUMENT_SEARCH_COLLECTION);
+        indexOps.ensureIndex(new Index().on("trading_symbol", Sort.Direction.ASC));
+        indexOps.ensureIndex(new Index().on("name", Sort.Direction.ASC));
+        indexOps.ensureIndex(new Index().on("segment", Sort.Direction.ASC));
+        indexOps.ensureIndex(new Index().on("instrument_type", Sort.Direction.ASC));
+    }
+
+    private List<NseInstrument> loadInstrumentUniverse() throws IOException {
+        try (InputStream stream = resolveInstrumentStream()) {
+            return mapper.readValue(stream, NSE_LIST_TYPE);
+        }
+    }
+
+    private InputStream resolveInstrumentStream() throws IOException {
+        if (StringUtils.hasText(instrumentsPath)) {
+            Path path = Path.of(instrumentsPath);
+            if (Files.exists(path)) {
+                log.info("Loading instruments from configured path: {}", path);
+                return Files.newInputStream(path);
+            }
+            log.warn("Configured NSE.json path not found: {}", path);
+        }
+        InputStream resourceStream = getClass().getClassLoader().getResourceAsStream("data/NSE.json");
+        if (resourceStream != null) {
+            return resourceStream;
+        }
+        throw new FileNotFoundException("Unable to locate NSE.json");
+    }
+
+    private boolean isEligibleForSearch(NseInstrument instrument) {
+        if (instrument == null) {
+            return false;
+        }
+        String segment = instrument.getSegment();
+        if (!StringUtils.hasText(segment)) {
+            return false;
+        }
+        if (!segment.toUpperCase(Locale.ROOT).startsWith("NSE")) {
+            return false;
+        }
+        if (!StringUtils.hasText(instrument.getInstrumentKey())) {
+            return false;
+        }
+        return StringUtils.hasText(instrument.getTradingSymbol());
     }
 
     /** Stats returned by refreshFromNseJson. */

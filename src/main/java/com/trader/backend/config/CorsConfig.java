@@ -21,12 +21,13 @@ public class CorsConfig {
     CorsConfiguration config = new CorsConfiguration();
     config.setAllowCredentials(true);
     config.setAllowedOrigins(Arrays.stream(allowedOrigins.split(",")).map(String::trim).toList());
-    config.setAllowedMethods(List.of("GET","POST","PUT","DELETE","OPTIONS"));
+    config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
     config.setAllowedHeaders(List.of("Authorization","Content-Type","Accept","Origin","Cache-Control","X-Requested-With"));
     config.setExposedHeaders(List.of("Location"));
 
     UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
-    source.registerCorsConfiguration("/**", config);
+    List.of("/auth/**", "/md/**", "/ops/**", "/ws/**")
+        .forEach(path -> source.registerCorsConfiguration(path, config));
     return new CorsFilter(source);
   }
 }

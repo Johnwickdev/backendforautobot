@@ -9,7 +9,6 @@ import org.springframework.web.filter.CorsFilter;
 
 import java.util.Arrays;
 import java.util.List;
-import java.util.stream.Collectors;
 
 @Configuration
 public class CorsConfig {
@@ -20,18 +19,10 @@ public class CorsConfig {
   @Bean
   public CorsFilter corsFilter() {
     CorsConfiguration config = new CorsConfiguration();
-    // If Authorization/cookies are needed, keep true and keep explicit origins
     config.setAllowCredentials(true);
-
-    List<String> origins = Arrays.stream(allowedOrigins.split(","))
-        .map(String::trim)
-        .collect(Collectors.toList());
-    config.setAllowedOrigins(origins);
-
-    config.setAllowedHeaders(List.of(
-        "Authorization", "Content-Type", "Accept", "Origin", "Cache-Control", "X-Requested-With"
-    ));
+    config.setAllowedOrigins(Arrays.stream(allowedOrigins.split(",")).map(String::trim).toList());
     config.setAllowedMethods(List.of("GET","POST","PUT","DELETE","OPTIONS"));
+    config.setAllowedHeaders(List.of("Authorization","Content-Type","Accept","Origin","Cache-Control","X-Requested-With"));
     config.setExposedHeaders(List.of("Location"));
 
     UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();

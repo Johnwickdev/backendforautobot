@@ -29,7 +29,7 @@
                 <maven.failsafe.plugin.version>3.2.5</maven.failsafe.plugin.version>
 
                 <!-- align your Protobuf versions here -->
-                <protoc.version>3.25.3</protoc.version>
+                <protoc.version>3.25.4</protoc.version>
                 <!-- Skip frontend build by default to avoid requiring Node during CI -->
                 <skipFrontend>true</skipFrontend>
         </properties>
@@ -53,11 +53,11 @@
                         <artifactId>spring-boot-starter-actuator</artifactId>
                 </dependency>
 
-		<!-- Upstox SDK -->
+                <!-- Upstox SDK (uses OkHttp v2 packages) -->
                 <dependency>
                         <groupId>com.upstox.api</groupId>
                         <artifactId>upstox-java-sdk</artifactId>
-                        <version>1.11.1</version>
+                        <version>1.17</version>
                         <exclusions>
                                 <exclusion>
                                         <groupId>com.google.protobuf</groupId>
@@ -76,18 +76,26 @@
                                         <artifactId>logback-core</artifactId>
                                 </exclusion>
                                 <exclusion>
-                                        <groupId>com.squareup.okhttp</groupId>
+                                        <groupId>com.squareup.okhttp3</groupId>
                                         <artifactId>okhttp</artifactId>
                                 </exclusion>
                                 <exclusion>
-                                        <groupId>com.squareup.okhttp</groupId>
+                                        <groupId>com.squareup.okhttp3</groupId>
                                         <artifactId>logging-interceptor</artifactId>
                                 </exclusion>
-                                <exclusion>
-                                        <groupId>com.squareup.okio</groupId>
-                                        <artifactId>okio</artifactId>
-                                </exclusion>
                         </exclusions>
+                </dependency>
+
+                <!-- REQUIRED by Upstox SDK: OkHttp v2 API (com.squareup.okhttp.*) -->
+                <dependency>
+                        <groupId>com.squareup.okhttp</groupId>
+                        <artifactId>okhttp</artifactId>
+                        <version>2.7.5</version>
+                </dependency>
+                <dependency>
+                        <groupId>com.squareup.okhttp</groupId>
+                        <artifactId>logging-interceptor</artifactId>
+                        <version>2.7.5</version>
                 </dependency>
 
 
@@ -95,15 +103,15 @@
                 <dependency>
                         <groupId>com.google.protobuf</groupId>
                         <artifactId>protobuf-java</artifactId>
-                        <version>3.25.3</version>
+                        <version>3.25.4</version>
                 </dependency>
                 <dependency>
                         <groupId>com.google.protobuf</groupId>
                         <artifactId>protobuf-java-util</artifactId>
-                        <version>3.25.3</version>
+                        <version>3.25.4</version>
                 </dependency>
 
-                <!-- Enforce okhttp3/okio line -->
+                <!-- HTTP client for InfluxDB integration (okhttp3) -->
                 <dependency>
                         <groupId>com.squareup.okhttp3</groupId>
                         <artifactId>okhttp</artifactId>
@@ -147,11 +155,6 @@
 			<version>6.9.0</version>
 		</dependency>
                 <dependency>
-                        <groupId>com.squareup.okio</groupId>
-                        <artifactId>okio</artifactId>
-                        <version>3.7.0</version>
-                </dependency>
-                <dependency>
                         <groupId>org.springframework.boot</groupId>
                         <artifactId>spring-boot-starter-data-mongodb</artifactId>
                 </dependency>
@@ -183,10 +186,10 @@
                                                         <rules>
                                                                 <bannedDependencies>
                                                                         <excludes>
-                                                                                <exclude>com.google.protobuf:protobuf-java:(,3.25.3)</exclude>
-                                                                                <exclude>com.google.protobuf:protobuf-java:(3.25.3,)</exclude>
-                                                                                <exclude>com.google.protobuf:protobuf-java-util:(,3.25.3)</exclude>
-                                                                                <exclude>com.google.protobuf:protobuf-java-util:(3.25.3,)</exclude>
+                                                                                <exclude>com.google.protobuf:protobuf-java:(,3.25.4)</exclude>
+                                                                                <exclude>com.google.protobuf:protobuf-java:(3.25.4,)</exclude>
+                                                                                <exclude>com.google.protobuf:protobuf-java-util:(,3.25.4)</exclude>
+                                                                                <exclude>com.google.protobuf:protobuf-java-util:(3.25.4,)</exclude>
                                                                         </excludes>
                                                                         <searchTransitive>true</searchTransitive>
                                                                 </bannedDependencies>

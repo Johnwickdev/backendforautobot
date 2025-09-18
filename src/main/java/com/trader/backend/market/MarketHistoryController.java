@@ -15,7 +15,8 @@ import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.Locale;
-import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @RestController
 @RequestMapping("/api/market")
@@ -24,14 +25,14 @@ import java.util.Set;
 public class MarketHistoryController {
 
     private static final ZoneId MARKET_ZONE = ZoneId.of("Asia/Kolkata");
-    private static final Set<String> SUPPORTED_UNITS = Set.of("minutes", "hour", "day");
+    private static final Pattern INTERVAL_PATTERN =
+            Pattern.compile("^(\\d+)?(minute|day)$", Pattern.CASE_INSENSITIVE);
 
     private final HistoricalDataService historicalDataService;
 
     @GetMapping("/history")
     public List<CandleDto> history(@RequestParam("instrumentKey") String instrumentKey,
-                                   @RequestParam(value = "unit", defaultValue = "minutes") String unit,
-                                   @RequestParam(value = "interval", defaultValue = "1") int interval,
+                                   @RequestParam(value = "interval", defaultValue = "1minute") String interval,
                                    @RequestParam(value = "from", required = false)
                                    @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
                                    @RequestParam(value = "to", required = false)
@@ -40,10 +41,24 @@ public class MarketHistoryController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "instrumentKey is required");
         }
 
-        String normalizedUnit = normalizeUnit(unit);
-        if (interval <= 0) {
+        String intervalToken = StringUtils.hasText(interval) ? interval.trim() : "1minute";
+        Matcher matcher = INTERVAL_PATTERN.matcher(intervalToken);
+        if (!matcher.matches() && intervalToken.chars().allMatch(Character::isDigit)) {
+            intervalToken = intervalToken + "minute";
+            matcher = INTERVAL_PATTERN.matcher(intervalToken);
+        }
+        if (!matcher.matches()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid interval: " + interval);
+        }
+
+        int units = matcher.group(1) != null ? Integer.parseInt(matcher.group(1)) : 1;
+        if (units <= 0) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "interval must be positive");
         }
+
+        String unit = matcher.group(2).toLowerCase(Locale.ROOT);
+        String normalizedUnit = unit.equals("day") ? "day" : "minutes";
+        int normalizedInterval = unit.equals("day") ? units : units;
 
         LocalDate today = LocalDate.now(MARKET_ZONE);
         LocalDate startDate = from != null ? from : today;
@@ -52,7 +67,12 @@ public class MarketHistoryController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "to must be on or after from");
         }
 
-        List<Candle> candles = historicalDataService.getOrFetchHistory(instrumentKey, normalizedUnit, interval, startDate, endDate);
+        List<Candle> candles = historicalDataService.getOrFetchHistory(
+                instrumentKey,
+                normalizedUnit,
+                normalizedInterval,
+                startDate,
+                endDate);
         return candles.stream()
                 .map(candle -> new CandleDto(
                         candle.getTs() != null ? candle.getTs().toEpochMilli() : 0L,
@@ -62,14 +82,6 @@ public class MarketHistoryController {
                         candle.getClose(),
                         candle.getVolume()))
                 .toList();
-    }
-
-    private String normalizeUnit(String unit) {
-        String normalized = unit == null ? "minutes" : unit.toLowerCase(Locale.ROOT);
-        if (!SUPPORTED_UNITS.contains(normalized)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unsupported unit");
-        }
-        return normalized;
     }
 
     public record CandleDto(long ts, double o, double h, double l, double c, long v) {

@@ -29,63 +29,73 @@ public class MarketHistoryController {
 
     private final HistoricalDataService historicalDataService;
 
-    @GetMapping("/history")
+    // MarketHistoryController.java
+@GetMapping("/history")
+public List<CandleDto> history(
+    @RequestParam String instrumentKey,
+    @RequestParam(defaultValue = "1minute") String interval,
+    @RequestParam(required = false) String toDate,
+    @RequestParam(required = false) String fromDate,
+    @RequestParam(required = false) Integer limit
+) {
+    if (!StringUtils.hasText(instrumentKey)) {
+        throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "instrumentKey is required");
+    }
 
-    public List<CandleDto> history(@RequestParam("instrumentKey") String instrumentKey,
-                                   @RequestParam(value = "interval", defaultValue = "1minute") String interval,
-                                   @RequestParam("toDate") String toDate,
-                                   @RequestParam(value = "fromDate", required = false) String fromDate) {
-        if (!StringUtils.hasText(instrumentKey)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "instrumentKey is required");
+    // Parse interval like 1minute, 5minute, or day
+    String intervalToken = (StringUtils.hasText(interval) ? interval.trim() : "1minute");
+    Matcher m = INTERVAL_PATTERN.matcher(intervalToken);
+    if (!m.matches()) {
+        if (intervalToken.chars().allMatch(Character::isDigit)) {
+            intervalToken += "minute";
+            m = INTERVAL_PATTERN.matcher(intervalToken);
         }
+    }
+    if (!m.matches()) {
+        throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid interval: " + intervalToken);
+    }
+    int units = m.group(1) != null ? Integer.parseInt(m.group(1)) : 1;
+    if (units <= 0) {
+        throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "interval must be positive");
+    }
+    String unit = m.group(2).toLowerCase(Locale.ROOT);
+    if ("day".equals(unit) && m.group(1) == null) {
+        units = 1;
+    }
 
-        String intervalToken = StringUtils.hasText(interval) ? interval.trim() : "1minute";
-        Matcher matcher = INTERVAL_PATTERN.matcher(intervalToken);
-        if (!matcher.matches()) {
-            if (intervalToken.chars().allMatch(Character::isDigit)) {
-                intervalToken = intervalToken + "minute";
-                matcher = INTERVAL_PATTERN.matcher(intervalToken);
-            }
-        }
-        if (!matcher.matches()) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid interval: " + intervalToken);
-        }
-
-        int units = matcher.group(1) != null ? Integer.parseInt(matcher.group(1)) : 1;
-        if (units <= 0) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "interval must be positive");
-        }
-
-        String unit = matcher.group(2).toLowerCase(Locale.ROOT);
-        if ("day".equals(unit) && matcher.group(1) == null) {
-            units = 1;
-        }
-
-        String normalizedUnit = unit;
-        int normalizedInterval = units;
-
-        LocalDate endDate = parseDate(toDate, "toDate");
-        LocalDate startDate = StringUtils.hasText(fromDate) ? parseDate(fromDate, "fromDate") : endDate;
+    // Default toDate to today if not provided
+    LocalDate endDate = (StringUtils.hasText(toDate) ? parseDate(toDate, "toDate") : LocalDate.now());
+    LocalDate startDate;
+    if (limit != null && limit > 0) {
+        // Use limit (number of candles) to compute fromDate
+        int minutesPerCandle = "day".equals(unit) ? 1440 : units;
+        startDate = endDate.minusDays((long) limit * minutesPerCandle / 1440);
+    } else {
+        // If fromDate provided, parse it; otherwise use endDate
+        startDate = StringUtils.hasText(fromDate) ? parseDate(fromDate, "fromDate") : endDate;
         if (endDate.isBefore(startDate)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "to must be on or after from");
         }
-
-        List<Candle> candles = historicalDataService.getOrFetchHistory(
-                instrumentKey,
-                normalizedUnit,
-                normalizedInterval,
-                startDate,
-                endDate);
-        return candles.stream()
-                .map(candle -> new CandleDto(
-                        candle.getTs() != null ? candle.getTs().toEpochMilli() : 0L,
-                        candle.getOpen(),
-                        candle.getHigh(),
-                        candle.getLow(),
-                        candle.getClose(),
-                        candle.getVolume()))
-                .toList();
     }
+
+    // Call HistoricalDataService to fetch or retrieve cached candles
+    List<Candle> candles = historicalDataService.getOrFetchHistory(
+        instrumentKey,
+        unit,
+        units,
+        startDate,
+        endDate
+    );
+
+    return candles.stream().map(c -> new CandleDto(
+        c.getTs() != null ? c.getTs().toEpochMilli() : 0L,
+        c.getOpen(),
+        c.getHigh(),
+        c.getLow(),
+        c.getClose(),
+        c.getVolume()
+    )).toList();
+}
 
     private LocalDate parseDate(String value, String paramName) {
         if (!StringUtils.hasText(value)) {

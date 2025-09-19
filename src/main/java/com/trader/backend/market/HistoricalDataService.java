@@ -39,7 +39,8 @@ public class HistoricalDataService {
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ISO_LOCAL_DATE;
     private static final DateTimeFormatter LEGACY_TS_FORMATTER =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(MARKET_ZONE);
-    private static final Set<String> SUPPORTED_UNITS = Set.of("minutes", "hour", "day");
+    private static final Set<String> SUPPORTED_UNITS =
+            Set.of("minute", "minutes", "hour", "hours", "day", "days", "week", "weeks", "month", "months");
     private static final Duration API_TIMEOUT = Duration.ofSeconds(15);
 
     private final WebClient.Builder webClientBuilder;
@@ -101,11 +102,15 @@ public class HistoricalDataService {
     }
 
     private String normalizeUnit(String unit) {
-        String normalized = unit == null ? "minutes" : unit.toLowerCase(Locale.ROOT);
-        if (!SUPPORTED_UNITS.contains(normalized)) {
-            throw new IllegalArgumentException("Unsupported unit: " + unit);
-        }
-        return normalized;
+        String normalized = unit == null ? "minute" : unit.toLowerCase(Locale.ROOT);
+        return switch (normalized) {
+            case "minute", "minutes" -> "minute";
+            case "hour", "hours" -> "hour";
+            case "day", "days" -> "day";
+            case "week", "weeks" -> "week";
+            case "month", "months" -> "month";
+            default -> throw new IllegalArgumentException("Unsupported unit: " + unit);
+        };
     }
 
     private boolean ensureToken() {
@@ -126,14 +131,16 @@ public class HistoricalDataService {
                                           LocalDate to,
                                           String accessToken) {
         try {
-            URI uri = UriComponentsBuilder
+            UriComponentsBuilder builder = UriComponentsBuilder
                     .fromHttpUrl("https://api.upstox.com/v3/historical-candle")
                     .pathSegment(instrumentKey)
                     .pathSegment(unit)
                     .pathSegment(String.valueOf(interval))
-                    .queryParam("from", DATE_FORMATTER.format(from))
-                    .queryParam("to", DATE_FORMATTER.format(to))
-                    .build()
+                    .queryParam("to_date", DATE_FORMATTER.format(to));
+            if (from != null) {
+                builder.queryParam("from_date", DATE_FORMATTER.format(from));
+            }
+            URI uri = builder.build()
                     .encode()
                     .toUri();
 
@@ -207,14 +214,17 @@ public class HistoricalDataService {
         if (interval <= 0 || to.isBefore(from)) {
             return 0;
         }
-        ChronoUnit chronoUnit;
-        switch (unit) {
-            case "minutes" -> chronoUnit = ChronoUnit.MINUTES;
-            case "hour" -> chronoUnit = ChronoUnit.HOURS;
-            case "day" -> chronoUnit = ChronoUnit.DAYS;
+        ChronoUnit chronoUnit = switch (unit) {
+            case "minute" -> ChronoUnit.MINUTES;
+            case "hour" -> ChronoUnit.HOURS;
+            case "day" -> ChronoUnit.DAYS;
+            case "week" -> ChronoUnit.WEEKS;
+            case "month" -> ChronoUnit.MONTHS;
             default -> throw new IllegalArgumentException("Unsupported unit: " + unit);
-        }
-        long totalUnits = chronoUnit.between(from.atStartOfDay(MARKET_ZONE), to.plusDays(1).atStartOfDay(MARKET_ZONE));
+        };
+        long totalUnits = chronoUnit.between(
+                from.atStartOfDay(MARKET_ZONE),
+                to.plusDays(1).atStartOfDay(MARKET_ZONE));
         if (totalUnits <= 0) {
             return 0;
         }

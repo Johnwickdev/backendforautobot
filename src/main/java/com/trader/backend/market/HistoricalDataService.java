@@ -34,6 +34,8 @@ import java.util.Set;
 @RequiredArgsConstructor
 @Slf4j
 public class HistoricalDataService {
+    private static final int CHUNK_DAYS_MINUTE = 60;   // safe window for minute candles
+    private static final int CHUNK_DAYS_DAY    = 365;  // yearly chunks for day candles
 
     private static final ZoneId MARKET_ZONE = ZoneId.of("Asia/Kolkata");
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ISO_LOCAL_DATE;
@@ -53,52 +55,101 @@ public class HistoricalDataService {
                                           LocalDate from,
                                           LocalDate to) {
         String normalizedUnit = normalizeUnit(unit);
-        LocalDate sanitizedFrom = Objects.requireNonNull(from, "from");
-        LocalDate sanitizedTo = Objects.requireNonNull(to, "to");
+        LocalDate start = Objects.requireNonNull(from, "from");
+        LocalDate end   = Objects.requireNonNull(to,   "to");
 
-        Instant fromInstant = sanitizedFrom.atStartOfDay(MARKET_ZONE).toInstant();
-        Instant toInstant = sanitizedTo.plusDays(1).atStartOfDay(MARKET_ZONE).minusNanos(1).toInstant();
-
-        List<Candle> existing = candleRepository
+        // 1) read cache
+        Instant fromInstant = start.atStartOfDay(MARKET_ZONE).toInstant();
+        Instant toInstant   = end.plusDays(1).atStartOfDay(MARKET_ZONE).minusNanos(1).toInstant();
+        List<Candle> cached = candleRepository
                 .findByInstrumentKeyAndUnitAndIntervalAndTsBetween(instrumentKey, normalizedUnit, interval, fromInstant, toInstant);
 
-        long expected = expectedCount(normalizedUnit, interval, sanitizedFrom, sanitizedTo);
-        if (expected <= 0) {
-            log.debug("Expected count for {} {} {} from {} to {} is <= 0; returning cached {} candles",
-                    instrumentKey, normalizedUnit, interval, sanitizedFrom, sanitizedTo, existing.size());
-            return sortByTimestamp(existing);
-        }
-
-        if (existing.size() >= expected) {
-            return sortByTimestamp(existing);
-        }
-
-        if (!ensureToken()) {
-            log.warn("Unable to validate Upstox token; returning cached candles ({} entries)", existing.size());
-            return sortByTimestamp(existing);
-        }
-
+        // 2) ensure token; if not, just return cached
+        if (!ensureToken()) return sortByTimestamp(cached);
         String accessToken = upstoxAuthService.getAccessToken();
-        if (accessToken == null || accessToken.isBlank()) {
-            log.warn("No Upstox access token available; returning cached candles ({} entries)", existing.size());
-            return sortByTimestamp(existing);
+        if (accessToken == null || accessToken.isBlank()) return sortByTimestamp(cached);
+
+        // 3) iterate in API-friendly chunks and fetch what might be missing
+        List<Candle> fetchedAll = new ArrayList<>();
+        LocalDate cursorTo = end;
+
+        while (!cursorTo.isBefore(start)) {
+            LocalDate chunkFrom;
+            if ("minute".equals(normalizedUnit)) {
+                chunkFrom = cursorTo.minusDays(CHUNK_DAYS_MINUTE - 1L);
+            } else {
+                chunkFrom = cursorTo.minusDays(CHUNK_DAYS_DAY - 1L);
+            }
+            if (chunkFrom.isBefore(start)) chunkFrom = start;
+
+            List<Candle> part = callUpstox(instrumentKey, normalizedUnit, interval, chunkFrom, cursorTo, accessToken);
+            if (!part.isEmpty()) {
+                candleRepository.saveAll(part);
+                fetchedAll.addAll(part);
+            }
+
+            // move back one day to avoid overlap
+            cursorTo = chunkFrom.minusDays(1);
         }
 
-        List<Candle> fetched = fetchFromUpstox(instrumentKey, normalizedUnit, interval, sanitizedFrom, sanitizedTo, accessToken);
-        if (CollectionUtils.isEmpty(fetched)) {
-            return sortByTimestamp(existing);
-        }
+        // 4) merge (prefer freshest duplicate by ts)
+        Map<String, Candle> map = new HashMap<>();
+        for (Candle c : cached) map.put(c.getId(), c);
+        for (Candle c : fetchedAll) map.put(c.getId(), c);
 
-        candleRepository.saveAll(fetched);
+        return sortByTimestamp(new ArrayList<>(map.values()));
+    }
+    private List<Candle> callUpstox(String instrumentKey,
+                                    String unit,
+                                    int interval,
+                                    LocalDate from,
+                                    LocalDate to,
+                                    String accessToken) {
+        try {
+            URI uri = UriComponentsBuilder
+                    .fromHttpUrl("https://api.upstox.com/v3/historical-candle")
+                    .pathSegment(instrumentKey)   // safe: encodes '|' -> %7C
+                    .pathSegment(unit)
+                    .pathSegment(String.valueOf(interval))
+                    .queryParam("from_date", DATE_FORMATTER.format(from))
+                    .queryParam("to_date",   DATE_FORMATTER.format(to))
+                    .build()
+                    .encode()
+                    .toUri();
 
-        Map<String, Candle> combined = new HashMap<>();
-        for (Candle candle : existing) {
-            combined.put(candle.getId(), candle);
+            WebClient client = webClientBuilder.clone().build();
+            JsonNode response = client.get()
+                    .uri(uri)
+                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken)
+                    .header(HttpHeaders.ACCEPT, MediaType.APPLICATION_JSON_VALUE)
+                    .retrieve()
+                    .bodyToMono(JsonNode.class)
+                    .block(API_TIMEOUT);
+
+            if (response == null) return List.of();
+            JsonNode candlesNode = response.path("data").path("candles");
+            if (!candlesNode.isArray()) return List.of();
+
+            List<Candle> out = new ArrayList<>();
+            for (JsonNode row : candlesNode) {
+                if (!row.isArray() || row.size() < 5) continue;
+                Instant ts = parseTimestamp(row.get(0).asText(null));
+                if (ts == null) continue;
+                double open  = row.get(1).asDouble();
+                double high  = row.get(2).asDouble();
+                double low   = row.get(3).asDouble();
+                double close = row.get(4).asDouble();
+                long volume  = row.size() > 5 && row.get(5).isNumber() ? row.get(5).longValue() : 0L;
+                long oi      = row.size() > 6 && row.get(6).isNumber() ? row.get(6).longValue() : 0L;
+
+                out.add(Candle.create(instrumentKey, unit, interval, ts, open, high, low, close, volume, oi));
+            }
+            return out;
+        } catch (Exception ex) {
+            log.warn("Upstox history fetch failed for {} {} {} {}..{}",
+                    instrumentKey, unit, interval, from, to, ex);
+            return List.of();
         }
-        for (Candle candle : fetched) {
-            combined.put(candle.getId(), candle);
-        }
-        return sortByTimestamp(new ArrayList<>(combined.values()));
     }
 
     private String normalizeUnit(String unit) {
